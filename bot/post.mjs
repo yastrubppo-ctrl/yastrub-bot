@@ -35,7 +35,6 @@ try {
 } catch (e) {
   console.log('❌ Функція __tgBuild не з\'явилась.');
   console.log('Початок тексту сторінки:', (await page.evaluate(() => document.body.innerText)).slice(0, 300));
-  console.log('Є L (leaflet)?', await page.evaluate(() => typeof window.L));
   await browser.close();
   process.exit(1);
 }
@@ -46,8 +45,21 @@ if (!r.n) { await page.waitForTimeout(10000); r = await page.evaluate(() => wind
 console.log('Цілей:', r.n);
 if (!r.n && SKIP_IF_EMPTY) { await browser.close(); console.log('Цілей нема — пропускаю.'); process.exit(0); }
 
-await page.addStyleTag({ content: '.leaflet-control-container{display:none!important}' }).catch(() => {});
-const shot = await page.locator('#map').screenshot({ type: 'jpeg', quality: 85 }).catch(async () => page.screenshot({ type: 'jpeg', quality: 85 }));
+// ── ЧИСТИЙ СКРІНШОТ: ховаємо всі панелі, лишаємо карту + логотип + годинник ──
+await page.addStyleTag({ content: `
+  body > *:not(#map):not(.brand-badge):not(.clock-container):not(script):not(style) { display: none !important; }
+  .leaflet-control-container { display: none !important; }
+  #map { position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; margin: 0 !important; }
+` });
+await page.evaluate(() => {
+  const m = window.map;
+  if (m) {
+    m.invalidateSize();
+    m.fitBounds([[44.2, 22.1], [52.4, 40.3]], { animate: false, padding: [10, 10] });   // вся Україна
+  }
+});
+await page.waitForTimeout(4000);   // дочекатись плиток карти
+const shot = await page.screenshot({ type: 'jpeg', quality: 85 });
 await browser.close();
 
 const text = r.n ? r.html : '✅ Активних цілей немає';
