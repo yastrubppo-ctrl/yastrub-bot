@@ -19,3 +19,4 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           SITE_URL: ${{ secrets.SITE_URL }}
+          VERCEL_BYPASS: ${{ secrets.VERCEL_BYPASS }}
