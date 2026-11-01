@@ -1,7 +1,5 @@
 name: Telegram автопостинг
 on:
-  schedule:
-    - cron: '*/10 * * * *'
   workflow_dispatch:
 concurrency: tg-post
 jobs:
