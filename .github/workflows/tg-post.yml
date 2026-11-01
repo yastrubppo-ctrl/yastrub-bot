@@ -1,0 +1,21 @@
+name: Telegram автопостинг
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+concurrency: tg-post
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install --prefix bot
+      - run: npx --prefix bot playwright install --with-deps chromium
+      - run: node bot/post.mjs
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          SITE_URL: ${{ secrets.SITE_URL }}
