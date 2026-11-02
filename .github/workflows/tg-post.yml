@@ -12,6 +12,11 @@ jobs:
         with: { node-version: 20 }
       - run: npm install --prefix bot
       - run: npx --prefix bot playwright install --with-deps chromium
+      - uses: actions/cache@v4
+        with:
+          path: bot/alert-state.json
+          key: alert-state-${{ github.run_id }}
+          restore-keys: alert-state-
       - run: node bot/post.mjs
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
