@@ -6,6 +6,7 @@ const { TG_BOT_TOKEN, TG_CHAT_ID, SITE_URL, VERCEL_BYPASS } = process.env;
 const SKIP_IF_EMPTY = process.env.SKIP_IF_EMPTY !== '0';
 const KAB_ALERTS = process.env.KAB_ALERTS !== '0';                       // KAB_ALERTS=0 вимикає попередження про літаки
 const KAB_COOLDOWN_MIN = Number(process.env.KAB_COOLDOWN_MIN || 60);
+const NEWS_SEND = process.env.NEWS_SEND !== '0';                          // NEWS_SEND=0: НЕ слати пуски в Telegram (це роблять окремі боти), але квадрати на карті блимають
 const NEWS_LAUNCHES = process.env.NEWS_LAUNCHES !== '0';                 // NEWS_LAUNCHES=0 вимикає пуски БпЛА/балістики з новин
 const NEWS_MAX_AGE_MIN = Number(process.env.NEWS_MAX_AGE_MIN || 20);     // беремо новини не старші за стільки хвилин
 const WAIT_MS = Number(process.env.WAIT_MS || 25000);
@@ -104,7 +105,7 @@ if (NEWS_LAUNCHES) {
     const pick = pickNewEvents(raw, state, Date.now(), { maxAgeMin: NEWS_MAX_AGE_MIN });
     mapTriggers = toMapTriggers(pick.active, { threatToo: BALLISTIC_THREAT_BLINK });
     console.log(`Новини: ${pick.stats.total} у стрічці, свіжих ${pick.stats.fresh}, без дати ${pick.stats.noDate}; подій про пуски: ${pick.stats.parsed}; до публікації: ${pick.events.length}`);
-    if (pick.events.length) {
+    if (NEWS_SEND && pick.events.length) {
       const res = await sendText(formatEvents(pick.events, footerHtml));
       console.log('Пуски з новин:', JSON.stringify(res).slice(0, 200));
       if (res.ok) { pick.stamps.forEach(([k, v]) => { state.news.sent[k] = v; }); saveState(); }
