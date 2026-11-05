@@ -1,21 +1,41 @@
 import { chromium } from 'playwright';
 import fs from 'node:fs';
+import { pickNewEvents, formatEvents } from './launches.mjs';
 
 const { TG_BOT_TOKEN, TG_CHAT_ID, SITE_URL, VERCEL_BYPASS } = process.env;
 const SKIP_IF_EMPTY = process.env.SKIP_IF_EMPTY !== '0';
 const KAB_ALERTS = process.env.KAB_ALERTS !== '0';                       // KAB_ALERTS=0 вимикає попередження про літаки
-const KAB_COOLDOWN_MIN = Number(process.env.KAB_COOLDOWN_MIN || 60);     // не повторювати для тієї ж області частіше
+const KAB_COOLDOWN_MIN = Number(process.env.KAB_COOLDOWN_MIN || 60);
+const NEWS_LAUNCHES = process.env.NEWS_LAUNCHES !== '0';                 // NEWS_LAUNCHES=0 вимикає пуски БпЛА/балістики з новин
+const NEWS_MAX_AGE_MIN = Number(process.env.NEWS_MAX_AGE_MIN || 20);     // беремо новини не старші за стільки хвилин
 const WAIT_MS = Number(process.env.WAIT_MS || 25000);
 if (!TG_BOT_TOKEN || !TG_CHAT_ID || !SITE_URL) { console.error('Потрібні TG_BOT_TOKEN, TG_CHAT_ID, SITE_URL'); process.exit(1); }
 
 const api = (m, body) => fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/${m}`, { method: 'POST', body }).then(r => r.json());
 const siteOrigin = new URL(SITE_URL).origin;
 
-// ── пам'ять між запусками (файл state/kab.json комітиться з workflow) ──
+// ── пам'ять між запусками (state/kab.json комітиться з workflow, лише якщо змінилась) ──
 const STATE_FILE = new URL('../state/kab.json', import.meta.url);
 let state = {};
 try { state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
 state.kab = state.kab || {};
+state.news = state.news || {};
+state.news.sent = state.news.sent || {};
+function saveState() {
+  const now = Date.now();
+  for (const k of Object.keys(state.kab)) if (now - state.kab[k] > 24 * 3600000) delete state.kab[k];
+  for (const k of Object.keys(state.news.sent)) if (now - state.news.sent[k].t > 24 * 3600000) delete state.news.sent[k];
+  fs.mkdirSync(new URL('../state/', import.meta.url), { recursive: true });
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 1));
+}
+async function sendText(html) {
+  const body = new FormData();
+  body.append('chat_id', TG_CHAT_ID);
+  body.append('parse_mode', 'HTML');
+  body.append('disable_web_page_preview', 'true');
+  body.append('text', html);
+  return api('sendMessage', body);
+}
 
 const browser = await chromium.launch({ args: ['--no-sandbox'] });
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1.5, timezoneId: 'Europe/Kyiv', locale: 'uk-UA' });
@@ -39,27 +59,42 @@ try {
   await browser.close(); process.exit(1);
 }
 await page.waitForTimeout(WAIT_MS);
+const footerHtml = await page.evaluate(() => (typeof window.__tgFooterHtml === 'function' ? window.__tgFooterHtml() : ''));
+
+// ══ 0) ПУСКИ БпЛА / БАЛІСТИКИ З НОВИН ══
+if (NEWS_LAUNCHES) {
+  try {
+    const raw = await page.evaluate(() => {
+      const arr = (window._dimapNewsHistory && window._dimapNewsHistory.length) ? window._dimapNewsHistory : (window._dimapNews || []);
+      const strip = h => {
+        try {
+          const d = new DOMParser().parseFromString('<body>' + String(h || '').replace(/<br\s*\/?>/gi, ' \n ') + '</body>', 'text/html');
+          return (d.body.textContent || '').replace(/[ \t]+/g, ' ').trim();
+        } catch (e) { return String(h || '').replace(/<[^>]*>/g, ' '); }
+      };
+      return arr.map(n => ({ id: String(n.id != null ? n.id : (n.url || '')), date: n.date || null, text: strip(n.text) })).filter(n => n.text);
+    });
+    const pick = pickNewEvents(raw, state, Date.now(), { maxAgeMin: NEWS_MAX_AGE_MIN });
+    console.log(`Новини: ${pick.stats.total} у стрічці, свіжих ${pick.stats.fresh}, без дати ${pick.stats.noDate}; подій про пуски: ${pick.stats.parsed}; до публікації: ${pick.events.length}`);
+    if (pick.events.length) {
+      const res = await sendText(formatEvents(pick.events, footerHtml));
+      console.log('Пуски з новин:', JSON.stringify(res).slice(0, 200));
+      if (res.ok) { pick.stamps.forEach(([k, v]) => { state.news.sent[k] = v; }); saveState(); }
+    }
+  } catch (e) { console.log('⚠️ Новини про пуски: помилка', e && e.message); }
+}
 
 // ══ 1) ОКРЕМЕ ПОПЕРЕДЖЕННЯ ПРО КАБи (літаки біля областей) ══
 if (KAB_ALERTS) {
   const pa = await page.evaluate(() => window.__tgPlaneAlerts());
   console.log(`Літаків-носіїв КАБ: ${pa.planes}; області загрози: ${pa.alerts.map(a => a.key).join(', ') || '—'}; DeepState: ${pa.occReady}`);
   const now = Date.now();
-  const fresh = pa.alerts.filter(a => !state.kab[a.key] || now - state.kab[a.key] > KAB_COOLDOWN_MIN * 60000);
+  if (!pa.occReady) console.log('⚠️ DeepState не завантажився — КАБ-попередження пропущено в цьому запуску.');
+  const fresh = !pa.occReady ? [] : pa.alerts.filter(a => !state.kab[a.key] || now - state.kab[a.key] > KAB_COOLDOWN_MIN * 60000);
   if (fresh.length) {
-    const body = new FormData();
-    body.append('chat_id', TG_CHAT_ID);
-    body.append('parse_mode', 'HTML');
-    body.append('disable_web_page_preview', 'true');
-    body.append('text', fresh.map(a => a.text).join('\n') + '\n\n' + pa.footerHtml);
-    const res = await api('sendMessage', body);
+    const res = await sendText(fresh.map(a => a.text).join('\n') + '\n\n' + pa.footerHtml);
     console.log('КАБ-попередження:', JSON.stringify(res).slice(0, 200));
-    if (res.ok) {
-      fresh.forEach(a => { state.kab[a.key] = now; });
-      Object.keys(state.kab).forEach(k => { if (now - state.kab[k] > 24 * 3600000) delete state.kab[k]; });   // чистимо старе
-      fs.mkdirSync(new URL('../state/', import.meta.url), { recursive: true });
-      fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 1));
-    }
+    if (res.ok) { fresh.forEach(a => { state.kab[a.key] = now; }); saveState(); }
   }
 }
 
