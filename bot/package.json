@@ -1,1 +1,1 @@
-{ "name": "yastrub-tg-bot", "private": true, "type": "module", "dependencies": { "playwright": "^1.48.0" } }
+{ "name": "yastrub-tg-bot", "private": true, "type": "module", "dependencies": { "playwright": "1.63.0" } }
