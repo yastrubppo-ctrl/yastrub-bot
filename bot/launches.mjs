@@ -3,7 +3,7 @@
 
 // ── Майданчики пусків БпЛА (id збігаються з shahedLaunchPads на карті) ──
 const SITES = [
-  { id: 'akhtarsk',  name: 'Приморсько-Ахтарськ', region: 'Краснодарський край', re: /приморск\p{L}*[-\s]?ахтарск|прим[-.\s]?ахтар|ахтарк|ахтарск/u },
+  { id: 'akhtarsk',  name: 'Приморсько-Ахтарськ', region: 'Краснодарський край', re: /приморс\p{L}*[-\s]?ахтар|прим[-.\s]?ахтар|ахтарс|ахтарк/u },
   { id: 'kursk',     name: 'Курськ',              region: 'Курська обл.',        re: /курськ|курск|халін|халин/u },
   { id: 'millerovo', name: 'Міллерово',           region: 'Ростовська обл.',     re: /м[іи]ллер[еоі]в/u },
   { id: 'donetsk',   name: 'Донецьк',             region: 'окупований',          re: /донецьк|донецк/u },
@@ -24,17 +24,18 @@ const SITES = [
 
 // ── Регіони для балістики («з Брянську» → Брянська область) ──
 const REGIONS = [
-  { name: 'Курська область',       re: /курськ|курск/u },
-  { name: 'Брянська область',      re: /брянськ|брянск|брянщин/u },
-  { name: 'Воронезька область',    re: /воронеж/u },
-  { name: 'Бєлгородська область',  re: /[бб][єе]лгород/u },
-  { name: 'Ростовська область',    re: /ростов/u },
-  { name: 'Краснодарський край',   re: /краснодар|[єе][йи]ськ|ейск|ахтарськ|ахтарск/u },
-  { name: 'Астраханська область (Капустін Яр)', re: /астрахан|капуст[іи]н/u },
-  { name: 'Крим',                  re: /(?:^|[^\p{L}])крим|(?:^|[^\p{L}])крым/u },
-  { name: 'Смоленська область',    re: /смоленськ|смоленск|шатал/u },
-  { name: 'Орловська область',     re: /орловськ|орловск|(?:^|[^\p{L}])орл|(?:^|[^\p{L}])орел|цимбулов/u },
-  { name: 'Донеччина (окупована)', re: /донецьк|донецк/u },
+  { id: 'kursk',     name: 'Курська область',       re: /курськ|курск/u },
+  { id: 'bryansk',   name: 'Брянська область',      re: /брянськ|брянск|брянщин/u },
+  { id: 'voronezh',  name: 'Воронезька область',    re: /воронеж/u },
+  { id: 'belgorod',  name: 'Бєлгородська область',  re: /[бб][єе]лгород/u },
+  { id: 'taganrog',  name: 'Ростовська область (Таганрог)', re: /таганрог/u },   // до загального «Ростов»
+  { id: 'taganrog',  name: 'Ростовська область',    re: /ростов/u },              // на карті один маркер — Таганрог
+  { id: 'krasnodar', name: 'Краснодарський край',   re: /краснодар|[єе][йи]ськ|ейск|ахтарськ|ахтарск/u },
+  { id: 'astrakhan', name: 'Астраханська область (Капустін Яр)', re: /астрахан|капуст[іи]н/u },
+  { id: 'crimea',    name: 'Крим',                  re: /(?:^|[^\p{L}])крим|(?:^|[^\p{L}])крым/u },
+  { id: 'smolensk',  name: 'Смоленська область',    re: /смоленськ|смоленск|шатал/u },
+  { id: 'oryol',     name: 'Орловська область',     re: /орловськ|орловск|(?:^|[^\p{L}])орл|(?:^|[^\p{L}])орел|цимбулов/u },
+  { id: 'donetsk',   name: 'Донеччина (окупована)', re: /донецьк|донецк/u },
 ];
 
 const MISSILES = [
@@ -53,7 +54,8 @@ const plural = n => (n % 10 === 1 && n % 100 !== 11) ? 'група'
   : ([2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100)) ? 'групи' : 'груп';
 
 const siteIn = t => SITES.filter(s => s.re.test(t));
-const regionIn = t => (REGIONS.find(r => r.re.test(t)) || {}).name || null;
+const regionObjIn = t => REGIONS.find(r => r.re.test(t)) || null;
+const regionIn = t => (regionObjIn(t) || {}).name || null;
 
 // Невідомий майданчик: «з Ейська», «с Моздока» — беремо слово з великої літери після прийменника
 const GENERIC_PLACE = /(?:^|[\s(])(?:з|із|с|со|из|від|от)\s+([A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,}(?:\s+[A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,})?)/u;
@@ -79,8 +81,12 @@ export function parseNews(rawText) {
       const missiles = MISSILES.filter(([, re]) => re.test(t)).map(([n]) => n);
       // регіон беремо після «з/із/с/из» — щоб «типу С-300» не плутати з місцем
       const after = /(?:^|\s)(?:з|із|с|со|из)\s+([^.!?,;()«»]+)/u.exec(t);
-      const region = regionIn(after ? after[1] : '');
-      events.push({ kind: 'ballistic', status: (isLaunch && !isThreat) ? 'launch' : 'threat', region, missiles });
+      // «з Брянська та Курська» → по події на кожен регіон (кожен має свій квадрат на карті)
+      const where = after ? after[1] : '';
+      const ros = []; for (const r of REGIONS) if (r.re.test(where) && !ros.some(x => x.id === r.id)) ros.push(r);
+      const status = (isLaunch && !isThreat) ? 'launch' : 'threat';
+      if (!ros.length) events.push({ kind: 'ballistic', status, region: null, regionId: null, missiles });
+      else for (const ro of ros) events.push({ kind: 'ballistic', status, region: ro.name, regionId: ro.id, missiles });
       continue;
     }
     if (drone) {                                  // ── БпЛА ──
@@ -195,5 +201,22 @@ export function pickNewEvents(raw, state, now, { maxAgeMin = 20 } = {}) {
     out.push(e);
     stamps.push([e.key, { t: now, g: e.groups || 0 }]);
   }
-  return { events: out, stamps, stats };
+  return { events: out, stamps, stats, active: merged };
+}
+
+// ── Тригери для карти: що саме підсвітити блимаючим квадратиком ──
+// drone → синій (точка пуску БпЛА), ballistic → червоний (регіон пуску балістики).
+// Крилаті ракети / Ту-95 / стратегічні аеродроми сюди не потрапляють взагалі.
+// threatToo=false — червоні квадрати лише для підтверджених пусків, без «загрози».
+export function toMapTriggers(events, { threatToo = true } = {}) {
+  const out = [], seen = new Set();
+  for (const e of events || []) {
+    let t = null;
+    if (e.kind === 'drone' && e.site && e.site.id) t = { kind: 'drone', siteId: e.site.id };
+    else if (e.kind === 'ballistic' && e.regionId && (threatToo || e.status === 'launch')) t = { kind: 'ballistic', regionId: e.regionId };
+    if (!t) continue;
+    const k = t.kind + '|' + (t.siteId || t.regionId);
+    if (!seen.has(k)) { seen.add(k); out.push(t); }
+  }
+  return out;
 }

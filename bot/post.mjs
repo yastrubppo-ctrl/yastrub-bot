@@ -1,6 +1,6 @@
 import { chromium } from 'playwright';
 import fs from 'node:fs';
-import { pickNewEvents, formatEvents } from './launches.mjs';
+import { pickNewEvents, formatEvents, toMapTriggers } from './launches.mjs';
 
 const { TG_BOT_TOKEN, TG_CHAT_ID, SITE_URL, VERCEL_BYPASS } = process.env;
 const SKIP_IF_EMPTY = process.env.SKIP_IF_EMPTY !== '0';
@@ -9,6 +9,9 @@ const KAB_COOLDOWN_MIN = Number(process.env.KAB_COOLDOWN_MIN || 60);
 const NEWS_LAUNCHES = process.env.NEWS_LAUNCHES !== '0';                 // NEWS_LAUNCHES=0 вимикає пуски БпЛА/балістики з новин
 const NEWS_MAX_AGE_MIN = Number(process.env.NEWS_MAX_AGE_MIN || 20);     // беремо новини не старші за стільки хвилин
 const WAIT_MS = Number(process.env.WAIT_MS || 25000);
+const BALLISTIC_THREAT_BLINK = process.env.BALLISTIC_THREAT_BLINK !== '0'; // червоні квадрати і для «загрози балістики», не лише для пусків
+const FRAME_BOUNDS = [[44.3, 22.1], [52.45, 40.3]];                        // межі України (з Кримом)
+const FRAME_PADDING = Number(process.env.FRAME_PADDING || 18);              // відступ від країв кадру, px
 if (!TG_BOT_TOKEN || !TG_CHAT_ID || !SITE_URL) { console.error('Потрібні TG_BOT_TOKEN, TG_CHAT_ID, SITE_URL'); process.exit(1); }
 
 const api = (m, body) => fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/${m}`, { method: 'POST', body }).then(r => r.json());
@@ -49,6 +52,8 @@ if (VERCEL_BYPASS) {                       // ключ Vercel — ТІЛЬКИ �
   });
 }
 
+await page.addInitScript(() => { try { localStorage.setItem('deepstateOccupiedVisible', '1'); } catch (e) {} });
+
 const resp = await page.goto(SITE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
 console.log('HTTP статус сайту:', resp && resp.status(), '| Заголовок:', await page.title());
 try {
@@ -62,6 +67,7 @@ await page.waitForTimeout(WAIT_MS);
 const footerHtml = await page.evaluate(() => (typeof window.__tgFooterHtml === 'function' ? window.__tgFooterHtml() : ''));
 
 // ══ 0) ПУСКИ БпЛА / БАЛІСТИКИ З НОВИН ══
+let mapTriggers = [];
 if (NEWS_LAUNCHES) {
   try {
     const raw = await page.evaluate(() => {
@@ -75,6 +81,7 @@ if (NEWS_LAUNCHES) {
       return arr.map(n => ({ id: String(n.id != null ? n.id : (n.url || '')), date: n.date || null, text: strip(n.text) })).filter(n => n.text);
     });
     const pick = pickNewEvents(raw, state, Date.now(), { maxAgeMin: NEWS_MAX_AGE_MIN });
+    mapTriggers = toMapTriggers(pick.active, { threatToo: BALLISTIC_THREAT_BLINK });
     console.log(`Новини: ${pick.stats.total} у стрічці, свіжих ${pick.stats.fresh}, без дати ${pick.stats.noDate}; подій про пуски: ${pick.stats.parsed}; до публікації: ${pick.events.length}`);
     if (pick.events.length) {
       const res = await sendText(formatEvents(pick.events, footerHtml));
@@ -109,10 +116,29 @@ await page.addStyleTag({ content: `
   .leaflet-control-container { display: none !important; }
   #map { position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; margin: 0 !important; }
 ` });
-await page.evaluate(() => {
+// шар «Окуповано» має бути ввімкнений гарантовано
+let occOk = await page.evaluate(() => (window.__tgEnsureOccupied ? window.__tgEnsureOccupied() : false));
+if (!occOk) {                              // запасний шлях: клік по кнопці шару
+  await page.evaluate(() => { const b = document.getElementById('layer-occupied'); if (b && !b.classList.contains('active')) b.click(); });
+  await page.waitForTimeout(6000);
+  occOk = await page.evaluate(() => !!(document.getElementById('layer-occupied') || {}).classList?.contains('active'));
+}
+console.log('Шар «Окуповано»:', occOk ? 'увімкнено' : '⚠️ НЕ вдалося ввімкнути');
+
+// блимаючі квадратики пусків: синій — БпЛА, червоний — балістика
+const nBlink = await page.evaluate(t => (window.__launchTrigger ? window.__launchTrigger(t) : -1), mapTriggers);
+console.log(`Тригери пусків на карті: ${nBlink} з ${mapTriggers.length}` + (nBlink === -1 ? ' (на сайті немає __launchTrigger — старий index.html?)' : ''));
+
+// кадр: Україна по кордонах із відступом. zoomSnap=0 — інакше Leaflet округлює зум вниз до цілого і країна виглядає дрібною
+await page.evaluate(([bounds, pad]) => {
   const m = window.map;
-  if (m) { m.invalidateSize(); m.fitBounds([[44.2, 22.1], [52.4, 40.3]], { animate: false, padding: [10, 10] }); }
-});
+  document.documentElement.classList.add('tg-shot');          // заморожує блимання у «увімкненому» стані
+  if (m) {
+    m.options.zoomSnap = 0; m.options.zoomDelta = 0.25;
+    m.invalidateSize();
+    m.fitBounds(bounds, { animate: false, padding: [pad, pad], maxZoom: 9 });
+  }
+}, [FRAME_BOUNDS, FRAME_PADDING]);
 await page.waitForTimeout(4000);
 const shot = await page.screenshot({ type: 'jpeg', quality: 85 });
 await browser.close();
