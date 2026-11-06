@@ -155,7 +155,7 @@ if (!occOk) {                              // запасний шлях: клі�
 }
 console.log('Шар «Окуповано»:', occOk ? 'увімкнено' : '⚠️ НЕ вдалося ввімкнути');
 
-// блимаючі квадратики пусків: синій — БпЛА, червоний — балістика
+// пуски: червона пульсуюча обводка навколо аеродрому / позиції пуску (БпЛА і балістика), аватарка маркера лишається видимою
 const nBlink = await safe('__launchTrigger', () => page.evaluate(t => (window.__launchTrigger ? window.__launchTrigger(t) : -1), mapTriggers), -1);
 console.log(`Тригери пусків на карті: ${nBlink} з ${mapTriggers.length}` + (nBlink === -1 ? ' (на сайті немає __launchTrigger — старий index.html?)' : ''));
 
@@ -170,6 +170,58 @@ await safe('кадр карти', () => page.evaluate(([bounds, pad]) => {
   }
 }, [FRAME_BOUNDS, FRAME_PADDING]));
 await page.waitForTimeout(4000);
+// ── ЛЕГЕНДА КАРТИ ──
+// Будується прямо тут, у боті (не залежить від того, чи оновлено index.html на сайті): іконки — ВЛАСНІ svg з img/ сайту.
+// Стоїть у вільному куті кадру (низ-ліво), масштабується під розмір вікна.
+const LEGEND_ROWS = [
+  { ic: ['geran2'],                       t: 'Поршневі БпЛА',       s: '80–250 км/год',   m: 'Герань-2 / Гербера' },
+  { ic: ['geran3', 'geran4', 'geran5'],   t: 'Реактивні БпЛА',      s: '350–650 км/год',  m: 'Герань-3 / 4 / 5' },
+  { ic: ['banderol'],                     t: 'Малі крилаті ракети', s: '400–600 км/год',  m: 'Бандероль / Філін' },
+  { ic: ['x101'],                         t: 'Крилаті ракети',      s: '850–1100 км/год', m: 'Х-101' },
+  { ic: ['kalibr', 'iskanderk'],          t: 'Крилаті ракети',      s: '850–1100 км/год', m: 'Калібр / Іскандер-К' },
+  { ic: ['x59', 'x69'],                   t: 'Крилаті ракети',      s: '850–1100 км/год', m: 'Х-59 / Х-69' },
+  { ic: ['kab'],                          t: 'КАБ',                 s: '',                m: 'Керована авіабомба' },
+  { ic: ['su34', 'su35', 'su57'],         t: 'Тактична авіація',    s: '',                m: 'Су-34 / Су-35 / Су-57' },
+  { ic: ['tu95', 'tu160', 'tu22m3'],      t: 'Стратегічна авіація', s: '',                m: 'Ту-95 / Ту-160 / Ту-22М3' },
+];
+const LEGEND_TITLE = 'Рух повітряних цілей над територією України';
+const LEGEND_NOTE = 'Мапа ґрунтується на інформації з відкритих джерел та не містить військову таємницю. Уся інформація, що зображена на мапі, є у відкритому доступі.';
+const legendInfo = await safe('легенда', () => page.evaluate(async ({ rows, title, note }) => {
+  const old = document.getElementById('tg-legend'); if (old) old.remove();
+  const host = document.getElementById('map'); if (!host) return { ok: false, why: 'нема #map' };
+  const FF = "Inter,system-ui,-apple-system,'Segoe UI',Arial,sans-serif";
+  const el = document.createElement('div');
+  el.id = 'tg-legend';
+  el.style.cssText = 'position:absolute;left:0;bottom:0;z-index:99999;pointer-events:none;transform-origin:left bottom;width:300px;box-sizing:border-box;padding:10px 12px 9px;border-radius:10px;background:rgba(8,13,24,.82);border:1px solid rgba(255,255,255,.14);box-shadow:0 6px 22px rgba(0,0,0,.55);color:#fff;font-family:' + FF + ';';
+  let h = '<div style="font:800 13px/1.18 ' + FF + ';letter-spacing:.03em;text-transform:uppercase;margin-bottom:5px">' + title + '</div>' +
+          '<div style="font:500 8.5px/1.3 ' + FF + ';color:rgba(255,255,255,.62);margin-bottom:7px">' + note + '</div>';
+  rows.forEach(r => {
+    h += '<div style="display:flex;align-items:center;gap:8px;margin:0 0 5px">' +
+         '<div style="display:flex;align-items:center;gap:2px;width:78px;flex:0 0 78px">' +
+         r.ic.map(k => '<img data-leg="1" src="img/' + k + '.svg" style="width:22px;height:22px;object-fit:contain;filter:drop-shadow(0 1px 2px rgba(0,0,0,.8))">').join('') + '</div>' +
+         '<div style="font:600 10px/1.2 ' + FF + '">' + r.t + (r.s ? ' <span style="color:rgba(255,255,255,.6);font-weight:500">' + r.s + '</span>' : '') +
+         '<div style="font:500 9px/1.2 ' + FF + ';color:rgba(255,255,255,.7)">' + r.m + '</div></div></div>';
+  });
+  // пуск — окремий блок: аватарка аеродрому з червоною обводкою
+  h += '<div style="height:1px;background:rgba(255,255,255,.15);margin:7px 0"></div>' +
+       '<div style="display:flex;align-items:center;gap:8px">' +
+       '<div style="width:78px;flex:0 0 78px;display:flex;align-items:center;padding-left:3px">' +
+       '<div style="position:relative;width:36px;height:36px;display:flex;align-items:center;justify-content:center">' +
+       '<div style="width:24px;height:24px;box-sizing:border-box;background:#1e90ff;border:2px solid #fff;border-radius:5px;display:flex;align-items:center;justify-content:center"><img data-leg="1" src="img/bpl.png" style="width:70%;height:70%;object-fit:contain"></div>' +
+       '<div style="position:absolute;inset:0;box-sizing:border-box;border:3px solid #ff1a1a;border-radius:9px;box-shadow:0 0 8px 3px rgba(255,26,26,.85)"></div></div></div>' +
+       '<div style="font:600 10px/1.2 ' + FF + '">Зафіксовано пуск<div style="font:500 9px/1.2 ' + FF + ';color:rgba(255,255,255,.7)">червона обводка навколо аеродрому, звідки стався пуск</div></div></div>';
+  el.innerHTML = h;
+  host.appendChild(el);
+  const sc = 0.85 * Math.max(0.6, Math.min(host.clientWidth / 1280, host.clientHeight / 900));   // 0.85 — щоб не зачіпати південно-західний край України
+  el.style.left = Math.round(14 * sc) + 'px'; el.style.bottom = Math.round(14 * sc) + 'px'; el.style.transform = 'scale(' + sc + ')';
+  const imgs = [...el.querySelectorAll('img[data-leg]')];
+  await Promise.race([Promise.all(imgs.map(im => im.complete ? 0 : new Promise(r => { im.onload = im.onerror = r; }))), new Promise(r => setTimeout(r, 8000))]);
+  let bad = 0; imgs.forEach(im => { if (!(im.complete && im.naturalWidth > 0)) { bad++; im.style.display = 'none'; } });   // битий/відсутній файл — ховаємо, а не показуємо «зламану» іконку
+  const bb = el.getBoundingClientRect();
+  return { ok: true, icons: imgs.length, broken: bad, box: [Math.round(bb.left), Math.round(bb.top), Math.round(bb.width), Math.round(bb.height)] };
+}, { rows: LEGEND_ROWS, title: LEGEND_TITLE, note: LEGEND_NOTE }), null);
+console.log('Легенда:', legendInfo ? JSON.stringify(legendInfo) : '⚠️ НЕ вдалося побудувати');
+await page.waitForTimeout(500);
 let shot;
 try { shot = await page.screenshot({ type: 'jpeg', quality: 85 }); }
 catch (e) { await fail('Не вдалося зробити скріншот: ' + (e && e.message)); }
