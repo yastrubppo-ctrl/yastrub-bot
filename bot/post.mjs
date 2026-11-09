@@ -12,6 +12,8 @@ const NEWS_MAX_AGE_MIN = Number(process.env.NEWS_MAX_AGE_MIN || 20);     // бе
 const WAIT_MS = Number(process.env.WAIT_MS || 25000);
 const HOOKS_TIMEOUT_MS = Number(process.env.HOOKS_TIMEOUT_MS || 60000);   // скільки чекати, поки сайт віддасть функції бота
 const BALLISTIC_THREAT_BLINK = process.env.BALLISTIC_THREAT_BLINK !== '0'; // червоні квадрати і для «загрози балістики», не лише для пусків
+const ALERTS_LAYER = process.env.ALERTS_LAYER !== '0';                       // ALERTS_LAYER=0 — не вмикати шар тривог на скріні
+const ALERT_OPACITY = Math.min(100, Math.max(20, Number(process.env.ALERT_OPACITY || 70)));   // «Відображення → Насиченість тривог», % (повзунок на сайті: 20–100)
 const FRAME_BOUNDS = [[44.3, 22.1], [52.45, 40.3]];                        // межі України (з Кримом)
 const FRAME_PADDING = Number(process.env.FRAME_PADDING || 18);              // відступ від країв кадру, px
 if (!TG_BOT_TOKEN || !TG_CHAT_ID || !SITE_URL) { console.log('::error::Потрібні TG_BOT_TOKEN, TG_CHAT_ID, SITE_URL (secrets/env у workflow)'); process.exit(1); }
@@ -154,6 +156,26 @@ if (!occOk) {                              // запасний шлях: клі�
   });
 }
 console.log('Шар «Окуповано»:', occOk ? 'увімкнено' : '⚠️ НЕ вдалося ввімкнути');
+
+// ── Шар тривог на мінімальній яскравості (насиченість ALERT_OPACITY %) ──
+// Спершу ставимо насиченість (повзунок «Відображення»), потім вмикаємо шар — тоді тривоги одразу малюються приглушеними.
+// Якщо сайт уже сам увімкнув шар (автозапуск через 1.5 с) — повторно НЕ перемикаємо, інакше вимкнемо.
+if (ALERTS_LAYER) {
+  const al = await safe('шар тривог', () => page.evaluate(async op => {
+    if (typeof applyAlertOpacity !== 'function' || typeof toggleAlertsLayer !== 'function') return { ok: false, why: 'на сайті нема applyAlertOpacity/toggleAlertsLayer' };
+    applyAlertOpacity(op);                                   // зберігає значення і (якщо шар уже активний) перемальовує
+    const slider = document.querySelector('input.asp-slider[oninput*="applyAlertOpacity"]');
+    if (slider) slider.value = op;
+    if (!window.alertsEnabled) toggleAlertsLayer();          // вмикає шар, вантажить межі й тягне тривоги
+    for (let i = 0; i < 40 && !window.alertsEnabled; i++) await new Promise(r => setTimeout(r, 250));
+    try { if (typeof _loadHromada === 'function') await _loadHromada(); } catch (e) {}
+    await updateAlerts();                                    // гарантовано дочекатись завантаження і малювання тривог
+    let painted = -1;
+    try { painted = Object.values(_oblast).filter(_isAlertColored).length; } catch (e) {}
+    return { ok: !!window.alertsEnabled, opacity: alertSettings.alertOpacity, paintedOblasts: painted };
+  }, ALERT_OPACITY), null);
+  console.log('Шар тривог:', al ? JSON.stringify(al) : '⚠️ НЕ вдалося ввімкнути', `(насиченість ${ALERT_OPACITY}%)`);
+}
 
 // пуски: червона пульсуюча обводка навколо аеродрому / позиції пуску (БпЛА і балістика), аватарка маркера лишається видимою
 const nBlink = await safe('__launchTrigger', () => page.evaluate(t => (window.__launchTrigger ? window.__launchTrigger(t) : -1), mapTriggers), -1);
