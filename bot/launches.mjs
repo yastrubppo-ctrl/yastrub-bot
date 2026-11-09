@@ -60,6 +60,33 @@ const regionIn = t => (regionObjIn(t) || {}).name || null;
 // Невідомий майданчик: «з Ейська», «с Моздока» — беремо слово з великої літери після прийменника
 const GENERIC_PLACE = /(?:^|[\s(])(?:з|із|с|со|из|від|от)\s+([A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,}(?:\s+[A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,})?)/u;
 
+// ── Кількість БпЛА в тексті: «10 звичайних, 8 реактивних», «12 БпЛА», «3 групи» ──
+// Повертає { normal, jet, unq }: normal/jet — числа з прямою вказівкою типу, unq — число без типу (лише «N БпЛА / шахедів / груп»).
+const NOT_MORE = '(?!\\d|[:.]\\d)';   // не відкушувати частину числа і не брати час «22:00»
+function droneCounts(st) {
+  const num = re => { const m = re.exec(st); return m ? Number(m[1]) : null; };
+  const jet = num(/(\d{1,3})\s*(?:шт\.?\s*)?(?:реактивн|jet)\p{L}*/u)
+    ?? num(new RegExp('реактивн\\p{L}*(?:\\s+(?:бпла|шахед\\p{L}*|дрон\\p{L}*))?\\s*[-–—:(]?\\s*(\\d{1,3})' + NOT_MORE, 'u'));
+  const normal = num(/(\d{1,3})\s*(?:шт\.?\s*)?(?:звичайн|поршнев|класичн)\p{L}*/u)
+    ?? num(new RegExp('(?:звичайн|поршнев|класичн)\\p{L}*(?:\\s+(?:бпла|шахед\\p{L}*|дрон\\p{L}*))?\\s*[-–—:(]?\\s*(\\d{1,3})' + NOT_MORE, 'u'));
+  const unq = num(/(\d{1,3})\s*(?:бпла|шахед\p{L}*|shahed|дрон\p{L}*|груп\p{L}*)/u);
+  return { normal, jet, unq };
+}
+// дописує кількості в подію (бере максимум, якщо одну й ту саму подію бачимо кілька разів)
+function applyCounts(ev, st) {
+  const c = droneCounts(st);
+  const jetWord = /реактивн/u.test(st);
+  let normal = c.normal, jetN = c.jet;
+  if (normal == null && jetN == null && c.unq != null) { if (jetWord) jetN = c.unq; else normal = c.unq; }   // «3 групи реактивних» → реактивні
+  // «3 групи, реактивні»: окремий сегмент лише з типом (без числа) — число з попереднього сегмента належить реактивним
+  if (jetWord && normal == null && jetN == null && ev.normal != null && ev.jetN == null) { ev.jetN = ev.normal; ev.normal = null; }
+  if (normal != null) ev.normal = Math.max(ev.normal || 0, normal);
+  if (jetN != null) ev.jetN = Math.max(ev.jetN || 0, jetN);
+  if (/груп/u.test(st)) ev.unit = 'groups';
+  if (jetWord) ev.jet = true;
+}
+const HAS_COUNT = /реактивн|звичайн|поршнев|класичн|\d{1,3}\s*(?:бпла|шахед|shahed|дрон|груп)/u;
+
 export function parseNews(rawText) {
   const text = String(rawText || '');
   const events = [];
@@ -92,7 +119,7 @@ export function parseNews(rawText) {
     if (drone) {                                  // ── БпЛА ──
       const droneAll = /реактивн|jet|герань-?3|geran-?3/u.test(t);
       const segs = clause.split(/\s*[,;]\s*|\s+(?:та|и|і)\s+/u).filter(Boolean);
-      let any = false;
+      let any = false, last = null;
       for (const seg of segs) {
         const st = norm(seg);
         const sites = siteIn(st);
@@ -101,15 +128,22 @@ export function parseNews(rawText) {
           const g = GENERIC_PLACE.exec(seg);
           if (g && !/(?:бпла|шахед)/iu.test(g[1])) site = { id: null, name: g[1].trim(), region: null };
         }
-        if (!site) continue;
+        if (!site) {            // «…з Міллерово, 8 реактивних» — сегмент без місця дописує кількість до попередньої події
+          if (last && HAS_COUNT.test(st)) applyCounts(last, st);
+          continue;
+        }
         const gm = /(\d{1,3})\s*груп/u.exec(st);
-        events.push({
+        const ev = {
           kind: 'drone', status: 'launch', site,
           groups: gm ? Number(gm[1]) : null,
           jet: /реактивн/u.test(st) || (droneAll && segs.length === 1),
           droneType: /shahed|шахед|герань|geran/u.test(t) ? 'shahed' : 'unknown',
           note,
-        });
+          normal: null, jetN: null, unit: 'drones',
+        };
+        applyCounts(ev, st);
+        events.push(ev);
+        last = ev;
         any = true;
       }
       void any;
@@ -127,6 +161,9 @@ export function mergeEvents(list) {
     if (!o) { m.set(key, { ...e, key }); continue; }
     if (e.groups != null) o.groups = Math.max(o.groups || 0, e.groups);
     if (e.jet) o.jet = true;
+    if (e.normal != null) o.normal = Math.max(o.normal || 0, e.normal);
+    if (e.jetN != null) o.jetN = Math.max(o.jetN || 0, e.jetN);
+    if (e.unit === 'groups') o.unit = 'groups';
     if (e.note && !o.note) o.note = e.note;
     if (e.missiles) o.missiles = [...new Set([...(o.missiles || []), ...e.missiles])];
   }
@@ -219,4 +256,34 @@ export function toMapTriggers(events, { threatToo = true } = {}) {
     if (!seen.has(k)) { seen.add(k); out.push(t); }
   }
   return out;
+}
+
+// ── Окремі скріни пусків БпЛА ──
+// Координати — з AIRBASES на сайті (де стоїть маркер аеродрому). Майданчики без маркера (Єйськ, Брянськ…) сюди не входять.
+export const SITE_COORDS = {
+  gvard: [45.112869, 33.976757], chauda: [45.002157, 35.839296], akhtarsk: [46.057578, 38.229532],
+  berdyansk: [46.812301, 36.753085], donetsk: [48.073588, 37.727429], millerovo: [48.953259, 40.296037],
+  kursk: [51.753603, 36.291073], nyavlya: [52.82544, 34.4996], orel: [53.3728, 35.80028],
+  shatalovo: [54.334013, 32.47851], saky: [45.133333, 33.583333],
+};
+// events — це pick.active (злиті події). Повертає по одному завданню на аеродром, де відома кількість БпЛА.
+export function toLaunchShots(events) {
+  const out = [];
+  for (const e of events || []) {
+    if (e.kind !== 'drone' || !e.site || !SITE_COORDS[e.site.id]) continue;
+    const normal = e.normal || 0, jetN = e.jetN || 0;
+    if (!normal && !jetN) continue;
+    const [lat, lng] = SITE_COORDS[e.site.id];
+    out.push({ key: e.key, siteId: e.site.id, name: e.site.name, region: e.site.region || null, lat, lng, normal, jetN, unit: e.unit || 'drones', note: e.note || null });
+  }
+  return out;
+}
+// підпис до фото
+export function formatShotCaption(j, footerHtml) {
+  const unit = n => j.unit === 'groups' ? plural(n) : '';
+  const parts = [];
+  if (j.normal) parts.push(`${j.normal} ${unit(j.normal)} звичайних`.replace('  ', ' '));
+  if (j.jetN) parts.push(`${j.jetN} ${unit(j.jetN)} реактивних`.replace('  ', ' '));
+  const place = j.region ? `${j.name} (${j.region})` : j.name;
+  return '🚀 Пуск БпЛА — ' + esc(place) + '\n' + esc(parts.join(' + ')) + (j.note ? '\n' + esc(j.note) : '') + (footerHtml ? '\n\n' + footerHtml : '');
 }
