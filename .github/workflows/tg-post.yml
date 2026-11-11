@@ -1,30 +1,77 @@
 name: Telegram автопостинг
+
 on:
   workflow_dispatch:           # запускає cron-job.org кожні 5 хв (+ ручна кнопка Run workflow)
-concurrency: tg-post
+
 permissions:
-  contents: write              # щоб зберігати пам'ять про надіслані КАБ-попередження
+  contents: write            # потрібно, щоб комітити state/kab.json
+
+# не запускати кілька копій одночасно (інакше state/kab.json може дублюватись/конфліктувати)
+concurrency:
+  group: tg-post
+  cancel-in-progress: false
+
 jobs:
   post:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ubuntu-24.04    # замість ubuntu-latest (той перейшов на Ubuntu 26, де apt зависав)
+    timeout-minutes: 8
+    env:
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      SITE_URL: ${{ secrets.SITE_URL }}
+      VERCEL_BYPASS: ${{ secrets.VERCEL_BYPASS }}
+      # необов'язкові налаштування (значення за замовчуванням уже в post.mjs):
+      # NEWS_SEND: '0'
+      # NEWS_MAX_AGE_MIN: '20'
+      # KAB_COOLDOWN_MIN: '60'
+      # WAIT_MS: '25000'
+      # HOOKS_TIMEOUT_MS: '60000'
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: npm install --prefix bot
-      - run: npx --prefix bot playwright install --with-deps chromium
-      - run: node bot/post.mjs
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          SITE_URL: ${{ secrets.SITE_URL }}
-          VERCEL_BYPASS: ${{ secrets.VERCEL_BYPASS }}
-      - name: Зберегти пам'ять (лише якщо змінилась)
+        with:
+          node-version: 22
+
+      - name: Install npm deps
+        run: npm install --prefix bot --no-audit --no-fund
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-1.63.0-chromium
+
+      # Без apt: образ ubuntu-24.04 вже містить системні бібліотеки для Chromium,
+      # а ubuntu-репозиторії з раннера інколи недоступні (DNS-збій) і apt висить хвилинами.
+      - name: Install Chromium (browser only, no apt)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 3
+        run: npx --prefix bot playwright install chromium
+
+      # Запасний варіант: тільки якщо Chromium не стартує через відсутні бібліотеки
+      - name: Check Chromium launches (fallback to apt deps)
+        timeout-minutes: 5
         run: |
-          if [ -f state/kab.json ]; then
-            git config user.name "yastrub-bot"
-            git config user.email "bot@users.noreply.github.com"
-            git add state/kab.json
-            git diff --cached --quiet || (git commit -m "state" && git push)
+          check() { (cd bot && node --input-type=module -e "import { chromium } from 'playwright'; const b = await chromium.launch(); await b.close(); console.log('chromium ok');"); }
+          if ! check; then
+            echo "::warning::Chromium не стартує, ставлю системні залежності через apt"
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update || true
+            npx --prefix bot playwright install-deps chromium
+          fi
+
+      - name: Post to Telegram
+        run: node bot/post.mjs
+
+      - name: Commit state
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain state/)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state/
+            git commit -m "state: update kab.json"
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            git push || echo "::warning::push state не вдався"
           fi
