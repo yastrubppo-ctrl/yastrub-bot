@@ -1,10 +1,7 @@
 name: Telegram автопостинг
 
 on:
-  workflow_dispatch:
-  # Якщо запускаєте не зовнішнім тригером, а за розкладом, розкоментуйте:
-  # schedule:
-  #   - cron: '*/10 * * * *'
+  workflow_dispatch:           # запускає cron-job.org кожні 5 хв (+ ручна кнопка Run workflow)
 
 permissions:
   contents: write            # потрібно, щоб комітити state/kab.json
@@ -46,23 +43,23 @@ jobs:
           path: ~/.cache/ms-playwright
           key: pw-${{ runner.os }}-1.63.0-chromium
 
-      - name: Apt retry settings
-        run: |
-          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/99retries
-
-      - name: Install Chromium + system deps
+      # Без apt: образ ubuntu-24.04 вже містить системні бібліотеки для Chromium,
+      # а ubuntu-репозиторії з раннера інколи недоступні (DNS-збій) і apt висить хвилинами.
+      - name: Install Chromium (browser only, no apt)
         if: steps.pw-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 4
-        run: |
-          sudo apt-get update
-          npx --prefix bot playwright install --with-deps chromium
-
-      - name: Install system deps only (cache hit)
-        if: steps.pw-cache.outputs.cache-hit == 'true'
         timeout-minutes: 3
+        run: npx --prefix bot playwright install chromium
+
+      # Запасний варіант: тільки якщо Chromium не стартує через відсутні бібліотеки
+      - name: Check Chromium launches (fallback to apt deps)
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          npx --prefix bot playwright install-deps chromium
+          check() { (cd bot && node --input-type=module -e "import { chromium } from 'playwright'; const b = await chromium.launch(); await b.close(); console.log('chromium ok');"); }
+          if ! check; then
+            echo "::warning::Chromium не стартує, ставлю системні залежності через apt"
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update || true
+            npx --prefix bot playwright install-deps chromium
+          fi
 
       - name: Post to Telegram
         run: node bot/post.mjs
