@@ -59,13 +59,24 @@ const THREAT_RE   = /можлив|ймов[іи]рн|в[іі]рогідн|заг
 const LAUNCH_RE   = /(?:^|[^\p{L}])(?:пуск|запуск|запущен|запустил|запустили|запущено|стартува|стартов|старт(?![\p{L}])|взл[её]т|злет|злетіл|вилет|вилітає|виліт|вышл|вийшл|вийшов|випущен|випустил|кинул)/u;
 const NEG_RE      = /в[іи]дб[іо]й|відсутн|не\s+(?:зафіксов|фіксу|відбув|зафиксир|фиксир|було)|нем[аєе]є?\s+(?:пуск|запуск)|без\s+пуск/u;
 // доставка / переміщення: «доставили шахеди залізницею», «прибув ешелон з БР», «доставка БР до Нявлі»
-const DELIV_RE    = /достав|довез|довоз|завез|завоз|привез|привоз|ешелон|эшелон|потяг|поезд|вагон|залізнич|железнодорож|перекид|переброс|розвантаж|разгруз|парті(?:я|ї)\s+(?:шахед|бпла|ракет)/u;
+const DELIV_RE    = /достав|дов[еі]з|дов[оі]з|зав[еі]з|зав[оі]з|прив[еі]з|прив[оі]з|прибув|прибул|надійшов|надійшл|ешелон|эшелон|потяг|поезд|вагон|залізни[чц]|железнодорож|перекид|переброс|розвантаж|разгруз|парті(?:я|ї)\s+(?:шахед|бпла|ракет)/u;
 const TRANSPORTS = [
-  ['залізницею',    /ешелон|эшелон|потяг|поезд|вагон|залізнич|железнодорож|(?:^|[^\p{L}])жд(?![\p{L}])|цистерн/u],
+  ['залізницею',    /ешелон|эшелон|потяг|поезд|вагон|залізни[чц]|железнодорож|(?:^|[^\p{L}])жд(?![\p{L}])|цистерн/u],
   ['автотранспортом', /фур|колон|автотранспорт|вантажів|грузовик|камаз|трейлер|тягач|автомоб/u],
   ['повітрям',      /літак|самол[её]т|ил-?76|іл-?76|борт|вертол/u],
   ['морем',         /судн|корабл|паром|порт(?![\p{L}])|морем/u],
 ];
+
+// ── Емодзі НЕ враховуємо ──
+// ⚠️ лишається лише як межа блоків повідомлення (невидимий роздільник U+2063), решта піктограм (🚆📦🇺🇦 …) стають пробілом.
+// Тож і «🚆 Нявля — 40 шт», і «Нявля — 40 шт» розбираються однаково.
+const BLOCK = '\u2063';
+export function stripEmoji(s) {
+  return String(s == null ? '' : s)
+    .replace(/\u26A0\uFE0F?/gu, '\n' + BLOCK + '\n')
+    .replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u200D\uFE0F\u20E3]/gu, ' ')
+    .replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n');
+}
 
 // Нормалізація: нижній регістр, ё→е, апострофи, латинські «двійники» не чіпаємо (вони у регексах)
 const norm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[’`ʼ]/g, "'");
@@ -117,29 +128,60 @@ function parseDelivery(clause, t, { ball, drone }) {
   if (!cargo.length) cargo.push('missile');
   const transport = (TRANSPORTS.find(([, re]) => re.test(t)) || [null])[0];
   const missiles = MISSILES.filter(([, re]) => re.test(t)).map(([n]) => n);
-  const cm = /(\d{1,4})\s*(?:шт\.?\s*)?(?:бпла|шахед\p{L}*|shahed|дрон\p{L}*|ракет\p{L}*|бр(?![\p{L}])|вагон\p{L}*|ешелон\p{L}*|эшелон\p{L}*)/u.exec(t);
+  const cm = /(\d{1,4})\s*(?:шт\.?\s*)?(?:бпла|шахед\p{L}*|shahed|дрон\p{L}*|ракет\p{L}*|бр(?![\p{L}])|вагон\p{L}*|ешелон\p{L}*|эшелон\p{L}*|одиниц\p{L}*|од(?![\p{L}]))/u.exec(t);
   const count = cm ? Number(cm[1]) : null;
   const unitWagons = !!(cm && /вагон/u.test(cm[0]));
-  const base = { kind: 'delivery', status: 'delivery', cargo, transport, missiles, count, unitWagons };
+  const unitTrains = !!(cm && /[еэ]шелон/u.test(cm[0]));
+  const mm = /(?:герань|geran)-?\s?(\d(?:\s?\/\s?\d)*)/u.exec(t);
+  const model = mm ? 'Герань-' + mm[1].replace(/\s/g, '') : null;
+  const jet = /реактивн|jet/u.test(t) || (!!mm && mm[1].split('/').every(n => /^[345]$/.test(n.trim())));
+  const base = { kind: 'delivery', status: 'delivery', cargo, transport, missiles, count, unitWagons, unitTrains, model, jet };
   const sites = siteIn(t);
   if (sites.length) return sites.map(site => ({ ...base, site, region: site.region }));
   const ro = regionObjIn(t);
-  if (ro) return [{ ...base, site: { id: null, name: ro.name, region: null }, region: ro.name }];
+  if (ro) return [{ ...base, site: { id: null, name: ro.name, region: null }, region: ro.name, regionId: ro.id }];
   const g = DELIV_PLACE.exec(clause);
   const bad = /^(?:бпла|шахед|бр|баліст)/i;
   if (g && !bad.test(g[1])) return [{ ...base, site: { id: null, name: g[1].trim(), region: null }, region: null }];
   return [{ ...base, site: { id: null, name: 'місце не уточнено', region: null }, region: null }];
 }
 
+// «Орел (Цимбулово) — 70 одиниць (Герань-4/5);» — пункт списку під заголовком доставки
+const LIST_LINE = /^\s*[-•*–]?\s*([^—–:]{2,60}?)\s*[—–-]\s*(\d{1,4})\s*(?:од(?:иниц\p{L}*|\.)?|шт\.?|бпла)?\s*(?:\(([^)]*)\))?/u;
+function extractDeliveryLists(text, events) {
+  const keep = [];
+  for (const block of text.split(BLOCK)) {
+    let ctx = null;
+    for (const line of block.split('\n')) {
+      const t = norm(line);
+      if (!t.trim()) continue;
+      const drone = DRONE_RE.test(t), ball = BALL_STRONG.test(t) || (!drone && BALL_WEAK.test(t));
+      if ((drone || ball) && DELIV_RE.test(t) && /:\s*$/.test(line.trim())) { ctx = { drone, ball }; continue; }   // заголовок списку
+      const m = ctx && LIST_LINE.exec(line);
+      if (m) {
+        const synth = `${m[1]} — ${m[2]} од. ${m[3] || ''}`;
+        const evs = parseDelivery(synth, norm(synth), ctx);
+        evs.forEach(e => { e.count = Number(m[2]); });
+        events.push(...evs);
+        continue;
+      }
+      ctx = null;
+      keep.push(line);
+    }
+    keep.push(BLOCK);
+  }
+  return keep.join('\n');
+}
+
 export function parseNews(rawText) {
-  const text = String(rawText || '');
   const events = [];
+  const text = extractDeliveryLists(stripEmoji(rawText), events);
   // підліт: «Подлет после 22:00»
   const tm = /(?:подл[её]т|п[іи]дл[іи]т)\D{0,20}?(п[іи]сля|после|до)?\s*(\d{1,2})[:.](\d{2})/iu.exec(text);
   const note = tm ? ('підліт ' + (tm[1] ? (/до/i.test(tm[1]) ? 'до ' : 'після ') : 'близько ') + tm[2].padStart(2, '0') + ':' + tm[3]) : null;
 
   // кліни: розділяємо за ⚠️, крапками/знаками з пробілом, переносами та «+»
-  const clauses = text.split(/⚠️+|\n|\+|(?<=[.!?])\s+/u).map(s => s.trim()).filter(Boolean);
+  const clauses = text.split(/\u2063+|\n|\+|(?<!(?:^|\s)од\.)(?<=[.!?])\s+/u).map(s => s.trim()).filter(Boolean);
   for (const clause of clauses) {
     const t = norm(clause);
     if (NEG_RE.test(t)) continue;                               // «відбій», «пусків не зафіксовано»
@@ -230,7 +272,7 @@ export function mergeEvents(list) {
     if (e.kind === 'delivery') {
       o.cargo = [...new Set([...(o.cargo || []), ...(e.cargo || [])])];
       if (e.transport && !o.transport) o.transport = e.transport;
-      if (e.count != null && (o.count == null || e.count > o.count)) { o.count = e.count; o.unitWagons = e.unitWagons; }
+      if (e.count != null && (o.count == null || e.count > o.count)) { o.count = e.count; o.unitWagons = e.unitWagons; o.unitTrains = e.unitTrains; }
     }
   }
   // «загальну» тривогу без місця прибираємо, якщо є така сама з конкретним регіоном;
@@ -286,8 +328,10 @@ export function formatEvents(events, footerHtml) {
     const lines = dl.map(d => {
       const place = d.site.region ? `${d.site.name} (${d.site.region})` : d.site.name;
       const parts = [(d.cargo || []).map(c => CARGO[c] || c).join(' + ')];
+      if (d.model) parts.push(d.model + (d.jet ? ' (реактивні)' : ''));
+      else if (d.jet) parts.push('реактивні');
       if (d.missiles && d.missiles.length) parts.push(d.missiles.join(' / '));
-      if (d.count != null) parts.push(d.count + (d.unitWagons ? ' вагонів' : ' шт.'));
+      if (d.count != null) parts.push(d.count + (d.unitWagons ? ' вагонів' : d.unitTrains ? ' ешелонів' : ' шт.'));
       if (d.transport) parts.push(d.transport);
       return (d.transport === 'залізницею' ? '🚆 ' : '📦 ') + esc(place) + ' — ' + esc(parts.filter(Boolean).join(', '));
     });
@@ -321,9 +365,10 @@ export function pickNewEvents(raw, state, now, { maxAgeMin = 20 } = {}) {
     const more = (e.groups || 0) > ((prev && prev.g) || 0);
     const mis = (e.missiles || []).length;
     const moreMis = mis > ((prev && prev.m) || 0);              // з'явився новий тип ракети — це нова інформація
-    if (prev && now - prev.t <= ttl && !more && !moreMis) continue;   // уже публікували нещодавно
+    const moreCnt = e.kind === 'delivery' && (e.count || 0) > ((prev && prev.c) || 0);   // доставка: число зросло (40 → 70)
+    if (prev && now - prev.t <= ttl && !more && !moreMis && !moreCnt) continue;   // уже публікували нещодавно
     out.push(e);
-    stamps.push([e.key, { t: now, g: e.groups || 0, m: mis }]);
+    stamps.push([e.key, { t: now, g: e.groups || 0, m: mis, c: e.count || 0 }]);
   }
   return { events: out, stamps, stats, active: merged };
 }
@@ -373,4 +418,114 @@ export function formatShotCaption(j, footerHtml) {
   if (j.jetN) parts.push(`${j.jetN} ${unit(j.jetN)} реактивних`.replace('  ', ' '));
   const place = j.region ? `${j.name} (${j.region})` : j.name;
   return '🚀 Пуск БпЛА — ' + esc(place) + '\n' + esc(parts.join(' + ')) + (j.note ? '\n' + esc(j.note) : '') + (footerHtml ? '\n\n' + footerHtml : '');
+}
+
+
+// ══════════════════════════════════════════════════════════════
+// ── ОБЛІК ДОСТАВКИ ПО АЕРОДРОМАХ (для попапа на карті) ──
+// Правила:
+//  • числа з різних повідомлень за ОДИН день по одному місцю/типу не складаємо, а беремо як «оновлення загальної кількості»:
+//    було 40, пізніше написали 70 → додаємо 30 (разом 70). Менше або те саме число (повтор з іншого каналу) ігноруємо.
+//  • без вказаного місця («доставили 70 шахедів») ділимо порівну між усіма аеродромами з маркером на карті;
+//  • лише область/регіон («в Крим», «на Брянщину») — ділимо між аеродромами цього регіону;
+//  • вагони та ешелони рахуємо окремо від штук; значення з поділом/оцінкою позначаємо як «орієнтовні» (Est).
+// ══════════════════════════════════════════════════════════════
+const SITE_TO_MAP = { yeysk: 'akhtarsk', bryansk: 'nyavlya', morozovsk: 'millerovo' };   // майданчики без маркера → найближчий із маркером
+const REGION_TO_SITES = {
+  kursk: ['kursk'], bryansk: ['nyavlya'], oryol: ['orel'], smolensk: ['shatalovo'], krasnodar: ['akhtarsk'],
+  crimea: ['gvard', 'chauda', 'saky'], donetsk: ['donetsk'], taganrog: ['millerovo'],
+};
+const kyivDay = ts => new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Europe/Kyiv' });
+const hashStr = s => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h; };
+
+// ділить n на ids порівну; залишок розкидає по колу (зсув залежить від salt, щоб «зайві» не діставались завжди першим)
+function splitEven(n, ids, salt) {
+  const k = ids.length, base = Math.floor(n / k), rem = n % k, off = hashStr(salt) % k;
+  const out = ids.map(id => [id, base]);
+  for (let i = 0; i < rem; i++) out[(off + i) % k][1] += 1;
+  return out.filter(([, v]) => v > 0);
+}
+
+// куди віднести подію: масив id аеродромів, [] = «усі» (пул), null = місце відоме, але маркера на карті нема
+function deliveryTargets(ev) {
+  const sid = ev.site && ev.site.id;
+  if (sid) { const m = SITE_COORDS[sid] ? sid : SITE_TO_MAP[sid]; return m ? { ids: [m], est: false, key: m } : null; }
+  if (ev.regionId) { const ids = REGION_TO_SITES[ev.regionId]; return ids ? { ids, est: ids.length > 1, key: ev.regionId } : null; }
+  if (ev.site && ev.site.name && ev.site.name !== 'місце не уточнено') return null;
+  return { ids: Object.keys(SITE_COORDS), est: true, key: 'pool' };
+}
+
+// raw: [{ date, text }]. Повертає { today, bySite: { [siteId]: { days:{ 'YYYY-MM-DD': {drone,droneEst,ballistic,ballisticEst,missile,missileEst,wagons,trains} }, transports[], models[], lastTs, lastDelta } } }
+export function aggregateDeliveries(raw, { now = Date.now(), days = 7 } = {}) {
+  const from = now - days * 864e5;
+  const items = (raw || []).map(n => ({ ts: Date.parse(n.date), text: stripEmoji(n.text) }))
+    .filter(n => isFinite(n.ts) && n.ts >= from && n.ts <= now + 10 * 60000 && DELIV_RE.test(norm(n.text)))
+    .sort((a, b) => a.ts - b.ts);
+  const bySite = {}, groups = new Map();
+  const site = id => bySite[id] || (bySite[id] = { days: {}, transports: [], models: [], lastTs: 0, lastDelta: 0 });
+  const add = (id, day, metric, n) => { const d = site(id).days[day] || (site(id).days[day] = {}); d[metric] = (d[metric] || 0) + n; };
+  for (const it of items) {
+    const day = kyivDay(it.ts);
+    for (const ev of parseNews(it.text)) {
+      if (ev.kind !== 'delivery') continue;
+      const tg = deliveryTargets(ev);
+      if (!tg) continue;
+      const kind = (ev.cargo || []).includes('shahed') ? 'drone' : (ev.cargo || []).includes('ballistic') ? 'ballistic' : 'missile';
+      const unit = ev.unitWagons ? 'wagons' : ev.unitTrains ? 'trains' : 'items';
+      const metric = unit === 'items' ? kind : unit;
+      if (tg.key !== 'pool') for (const id of tg.ids) {
+        const s = site(id);
+        if (ev.transport && !s.transports.includes(ev.transport)) s.transports.push(ev.transport);
+        if (ev.model && !s.models.includes(ev.model)) s.models.push(ev.model);
+        s.lastTs = Math.max(s.lastTs, it.ts);
+      }
+      if (ev.count == null) continue;
+      const gk = day + '|' + metric + '|' + tg.key;
+      const g = groups.get(gk) || { max: 0 };
+      if (ev.count <= g.max) continue;                       // повтор / менше число — вже враховано
+      const delta = ev.count - g.max; g.max = ev.count; groups.set(gk, g);
+      const parts = tg.ids.length === 1 ? [[tg.ids[0], delta]] : splitEven(delta, tg.ids, gk + ':' + g.max);
+      for (const [id, v] of parts) {
+        add(id, day, metric + (tg.est && unit === 'items' ? 'Est' : ''), v);
+        const s = site(id); s.lastTs = Math.max(s.lastTs, it.ts); s.lastDelta = v;
+      }
+    }
+  }
+  return { today: kyivDay(now), bySite };
+}
+
+// підсумок по одному аеродрому: { today:{...}, week:{...}, transports, models, lastTs, lastDelta }
+export function siteSummary(agg, siteId) {
+  const s = agg && agg.bySite[siteId];
+  const sum = days => days.reduce((a, d) => { for (const k in d) a[k] = (a[k] || 0) + d[k]; return a; }, {});
+  if (!s) return { today: {}, week: {}, transports: [], models: [], lastTs: 0, lastDelta: 0 };
+  return { today: s.days[agg.today] || {}, week: sum(Object.values(s.days)), transports: s.transports, models: s.models, lastTs: s.lastTs, lastDelta: s.lastDelta };
+}
+
+// ── ПРИКЛАДИ ПОВІДОМЛЕНЬ (без емодзі; з емодзі розбір працює так само — вони відкидаються) ──
+// mins — «скільки хвилин тому» від now. Корисно для перевірки: node launches.mjs --demo
+export function makeSampleNews(now = Date.now()) {
+  const m = (mins, text, ch) => ({ id: 'demo' + mins + ch, date: new Date(now - mins * 60000).toISOString(), text, channel: ch });
+  return [
+    m(1700, 'На Курськ доставили 25 шахедів залізницею', 'канал А'),                                   // вчора → потрапить у «за 7 днів»
+    m(320, 'Шахеди. На Нявлю доставили ешелон з шахедами, близько 40 одиниць', 'канал А'),
+    m(300, 'Нявля: надійшов ешелон із шахедами, 40 шт.', 'канал Б'),                                    // повтор з іншого каналу — не дублюється
+    m(260, 'Приморсько-Ахтарськ: доставка шахедів залізницею, 2 ешелони', 'канал А'),
+    m(200, 'Доставили 40 шахедів, розподіляють по аеродромах', 'канал В'),                              // без місця → порівну між аеродромами
+    m(90,  'Оновлення: доставлено вже 70 шахедів. Розвантаження триває', 'канал В'),                    // було 40, стало 70 → додаємо 30
+    m(75,  'Доставка шахедів на аеродроми:\n- Орел (Цимбулово) — 70 одиниць (Герань-4/5);\n- Курськ (Халіно) — 30 одиниць\n- Міллерово — 20 одиниць', 'канал Г'),
+    m(60,  'Іл-76 завіз 25 шахедів до Шаталового', 'канал А'),
+    m(50,  'Донецьк: доставка 20 шахедів автотранспортом', 'канал Б'),
+    m(25,  'Донецьк: доставили вже 35 шахедів', 'канал Б'),                                             // +15
+    m(40,  'На Брянщину залізницею привезли БР Іскандер, 12 одиниць', 'канал А'),
+    m(35,  'Залізницею в Крим доставили 30 шахедів', 'канал В'),                                        // область → між аеродромами Криму
+    m(20,  '⚠️🚆 Бердянськ — прибув потяг з шахедами 🇷🇺, 15 одиниць ⚠️', 'канал А'),                    // емодзі відкидаються
+    m(10,  'Пуск шахедів з Міллерово, 10 звичайних, 8 реактивних', 'канал А'),                          // це пуск, а не доставка — в облік не йде
+  ];
+}
+
+// node launches.mjs --demo
+if (typeof process !== 'undefined' && process.argv && process.argv[1] && /launches[^/\\]*\.mjs$/.test(process.argv[1]) && process.argv.includes('--demo')) {
+  const now = Date.now(), agg = aggregateDeliveries(makeSampleNews(now), { now });
+  for (const id of Object.keys(SITE_COORDS)) console.log(id.padEnd(10), JSON.stringify(siteSummary(agg, id).today), JSON.stringify(siteSummary(agg, id).transports));
 }

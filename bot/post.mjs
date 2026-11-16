@@ -16,6 +16,14 @@ const ALERTS_LAYER = process.env.ALERTS_LAYER !== '0';                       // 
 const ALERT_OPACITY = Math.min(100, Math.max(20, Number(process.env.ALERT_OPACITY || 70)));   // «Відображення → Насиченість тривог», % (повзунок на сайті: 20–100)
 const FRAME_BOUNDS = [[44.3, 22.1], [52.45, 40.3]];                        // межі України (з Кримом)
 const FRAME_PADDING = Number(process.env.FRAME_PADDING || 18);              // відступ від країв кадру, px
+// ── Періодичність повідомлень (хвилини). Один бот, різні типи: ──
+const BALLISTIC_MIN = Number(process.env.BALLISTIC_MIN ?? 1);       // пуски і загроза балістики: щойно з'явились, далі не частіше ніж раз на стільки хвилин
+const LAUNCH_MIN    = Number(process.env.LAUNCH_MIN ?? 5);          // пуски БпЛА (+ доставка)
+const MISSILE_MIN   = Number(process.env.MISSILE_MIN ?? 5);         // ракети в повітрі (крилаті, балістичні, Х-101, Калібр, Іскандер-К…; Герань-5 і Бандероль сюди НЕ входять — це БпЛА)
+const SITUATION_MIN = Number(process.env.SITUATION_MIN ?? 10);      // загальна ситуація по БпЛА (шахеди, реактивні, Герань-5, Бандероль…)
+const RUN_SEC       = Number(process.env.RUN_SEC ?? process.env.NEWS_WATCH_SEC ?? 0);   // скільки секунд працювати безперервно (0 = один прохід і вихід)
+const POLL_SEC      = Number(process.env.POLL_SEC || 10);           // як часто перевіряти стрічку новин
+const RELOAD_MIN    = Number(process.env.RELOAD_MIN || 30);         // перезавантажувати сторінку кожні N хв (проти витоків пам'яті у довгому запуску)
 if (!TG_BOT_TOKEN || !TG_CHAT_ID || !SITE_URL) { console.log('::error::Потрібні TG_BOT_TOKEN, TG_CHAT_ID, SITE_URL (secrets/env у workflow)'); process.exit(1); }
 
 const api = async (m, body) => {
@@ -38,6 +46,7 @@ try { state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
 state.kab = state.kab || {};
 state.news = state.news || {};
 state.news.sent = state.news.sent || {};
+state.sched = state.sched || {};   // коли востаннє слали кожен тип: ballistic / launch / missile / situation
 function saveState() {
   const now = Date.now();
   for (const k of Object.keys(state.kab)) if (now - state.kab[k] > 24 * 3600000) delete state.kab[k];
@@ -92,9 +101,12 @@ const NEWS_WAIT_MS = Number(process.env.NEWS_WAIT_MS || 15000);           // с�
 const NEWS_WATCH_SEC = Number(process.env.NEWS_WATCH_SEC || 0);          // >0: ще стільки секунд перевіряти нові повідомлення кожні 8 с (швидші пуски без частого cron)
 const footerHtml = await safe('__tgFooterHtml', () => page.evaluate(() => (typeof window.__tgFooterHtml === 'function' ? window.__tgFooterHtml() : '')), '');
 
-// ══ 0) ПУСКИ БпЛА / БАЛІСТИКИ / ДОСТАВКА З НОВИН — ЄДИНИЙ БОТ ══
-// Повідомлення про пуски шле САМЕ цей бот (NEWS_SEND за замовчуванням увімкнено). Старі окремі боти вимкніть,
-// інакше буде дублювання. Балістика йде ОКРЕМИМ і ПЕРШИМ повідомленням, щоб не чекати БпЛА/доставку.
+// ── розклад: чи пора слати цей тип ──
+const INTERVAL = { ballistic: BALLISTIC_MIN * 60000, launch: LAUNCH_MIN * 60000, missile: MISSILE_MIN * 60000, situation: SITUATION_MIN * 60000 };
+const due = k => Date.now() - (state.sched[k] || 0) >= INTERVAL[k];
+const mark = k => { state.sched[k] = Date.now(); saveState(); };
+const mapReadyAt = Date.now() + WAIT_MS;                                  // карті потрібен час, щоб намалювати цілі
+
 let mapTriggers = [];
 const readNews = () => page.evaluate(() => {
   const arr = (window._dimapNewsHistory && window._dimapNewsHistory.length) ? window._dimapNewsHistory : (window._dimapNews || []);
@@ -106,66 +118,56 @@ const readNews = () => page.evaluate(() => {
   };
   return arr.map(n => ({ id: String(n.id != null ? n.id : (n.url || '')), date: n.date || null, text: strip(n.text) })).filter(n => n.text);
 });
-// одна передача: читає стрічку, шле нове (балістика → потім БпЛА + доставка), запам'ятовує надіслане у state
+// одна передача: читає стрічку й шле нове. Балістика — окремим повідомленням і без очікування (лише пауза BALLISTIC_MIN між повідомленнями),
+// пуски БпЛА/доставка — не частіше ніж раз на LAUNCH_MIN. Те, що не встигло піти через паузу, повернеться на наступній передачі (поки новина свіжа).
 async function newsPass(label) {
   const raw = await readNews();
   const pick = pickNewEvents(raw, state, Date.now(), { maxAgeMin: NEWS_MAX_AGE_MIN });
   if (pick.active && pick.active.length) mapTriggers = toMapTriggers(pick.active, { threatToo: BALLISTIC_THREAT_BLINK });
-  console.log(`${label}: ${pick.stats.total} у стрічці, свіжих ${pick.stats.fresh}, без дати ${pick.stats.noDate}; подій: ${pick.stats.parsed}; до публікації: ${pick.events.length}`);
+  if (pick.events.length || label) console.log(`${label || 'Новини'}: ${pick.stats.total} у стрічці, свіжих ${pick.stats.fresh}, без дати ${pick.stats.noDate}; подій: ${pick.stats.parsed}; до публікації: ${pick.events.length}`);
   if (!NEWS_SEND || !pick.events.length) return pick.events.length;
-  const groups = [
-    ['балістика', pick.events.filter(e => e.kind === 'ballistic')],
-    ['БпЛА/доставка', pick.events.filter(e => e.kind !== 'ballistic')],
+  const channels = [
+    ['ballistic', 'балістика', pick.events.filter(e => e.kind === 'ballistic')],
+    ['launch', 'БпЛА/доставка', pick.events.filter(e => e.kind !== 'ballistic')],
   ];
-  for (const [name, evs] of groups) {
-    if (!evs.length) continue;
+  for (const [key, name, evs] of channels) {
+    if (!evs.length || !due(key)) continue;
     const res = await sendText(formatEvents(evs, footerHtml));
     console.log(`Пуски з новин (${name}):`, JSON.stringify(res).slice(0, 200));
-    if (res.ok) { evs.forEach(e => { const st = pick.stamps.find(([k]) => k === e.key); if (st) state.news.sent[st[0]] = st[1]; }); saveState(); }
+    if (res.ok) { evs.forEach(e => { const st = pick.stamps.find(([k]) => k === e.key); if (st) state.news.sent[st[0]] = st[1]; }); mark(key); }
     else console.log(`::warning::Новини (${name}) не надіслано: ${res.description}`);
   }
   return pick.events.length;
 }
-if (NEWS_LAUNCHES) {
-  try {
-    await page.waitForFunction(() => (window._dimapNewsHistory && window._dimapNewsHistory.length) || (window._dimapNews && window._dimapNews.length), null, { timeout: NEWS_WAIT_MS })
-      .catch(() => console.log('⚠️ Стрічка новин не завантажилась за відведений час — пробую з тим, що є.'));
-    await newsPass('Новини');
-    const until = Date.now() + NEWS_WATCH_SEC * 1000;
-    while (Date.now() < until) {
-      await page.waitForTimeout(8000);
-      await safe('newsPass(watch)', () => newsPass('Новини (повтор)'));
-    }
-  } catch (e) { console.log('⚠️ Новини про пуски: помилка', e && e.message); }
-}
-await page.waitForTimeout(WAIT_MS);   // решта очікування — лише для карти
 
-// ══ 1) ОКРЕМЕ ПОПЕРЕДЖЕННЯ ПРО КАБи (літаки біля областей) ══
-if (KAB_ALERTS) {
+
+// ══ ОКРЕМЕ ПОПЕРЕДЖЕННЯ ПРО КАБи (літаки біля областей) ══
+let lastKabCheck = 0;
+async function kabPass() {
+  if (!KAB_ALERTS || Date.now() - lastKabCheck < 30000) return;
+  lastKabCheck = Date.now();
   const pa = await safe('__tgPlaneAlerts', () => page.evaluate(() => window.__tgPlaneAlerts()), null);
-  if (pa) {
-    console.log(`Літаків-носіїв КАБ: ${pa.planes}; області загрози: ${pa.alerts.map(a => a.key).join(', ') || '—'}; DeepState: ${pa.occReady}`);
-    const now = Date.now();
-    if (!pa.occReady) console.log('⚠️ DeepState не завантажився — КАБ-попередження пропущено в цьому запуску.');
-    const fresh = !pa.occReady ? [] : pa.alerts.filter(a => !state.kab[a.key] || now - state.kab[a.key] > KAB_COOLDOWN_MIN * 60000);
-    if (fresh.length) {
-      const res = await sendText(fresh.map(a => a.text).join('\n') + '\n\n' + pa.footerHtml);
-      console.log('КАБ-попередження:', JSON.stringify(res).slice(0, 200));
-      if (res.ok) { fresh.forEach(a => { state.kab[a.key] = now; }); saveState(); }
-      else console.log(`::warning::КАБ-попередження не надіслано: ${res.description}`);
-    }
+if (pa) {
+  console.log(`Літаків-носіїв КАБ: ${pa.planes}; області загрози: ${pa.alerts.map(a => a.key).join(', ') || '—'}; DeepState: ${pa.occReady}`);
+  const now = Date.now();
+  if (!pa.occReady) console.log('⚠️ DeepState не завантажився — КАБ-попередження пропущено в цьому запуску.');
+  const fresh = !pa.occReady ? [] : pa.alerts.filter(a => !state.kab[a.key] || now - state.kab[a.key] > KAB_COOLDOWN_MIN * 60000);
+  if (fresh.length) {
+    const res = await sendText(fresh.map(a => a.text).join('\n') + '\n\n' + pa.footerHtml);
+    console.log('КАБ-попередження:', JSON.stringify(res).slice(0, 200));
+    if (res.ok) { fresh.forEach(a => { state.kab[a.key] = now; }); saveState(); }
+    else console.log(`::warning::КАБ-попередження не надіслано: ${res.description}`);
   }
 }
+}
 
-// ══ 2) ЗВЕДЕННЯ ПО ОБЛАСТЯХ + СКРІНШОТ ══
-let r;
-try {
-  r = await page.evaluate(() => window.__tgBuild());
-  if (!r.n) { await page.waitForTimeout(10000); r = await page.evaluate(() => window.__tgBuild()); }
-} catch (e) { await fail('__tgBuild впав на сторінці: ' + (e && e.message)); }
-console.log(`Цілей: ${r.n} | відсічено: ТОТ ${r.skippedOcc}, поза Україною ${r.skippedOutside}, літаки ${r.skippedPlanes} | DeepState: ${r.occReady}`);
-if (!r.n && SKIP_IF_EMPTY) { await browser.close(); console.log('Цілей нема — пропускаю.'); process.exit(0); }
 
+// ══ СКРІНШОТ КАРТИ ══
+// Підготовка карти (стилі, шар «Окуповано», шар тривог, кадр, легенда) робиться ОДИН раз; далі лише знімаємо.
+let shotReady = false;
+async function prepareShot() {
+  if (shotReady) return;
+  shotReady = true;
 await page.addStyleTag({ content: `
   body > *:not(#map):not(.brand-badge):not(.clock-container):not(script):not(style) { display: none !important; }
   .leaflet-control-container { display: none !important; }
@@ -268,30 +270,80 @@ const legendInfo = await safe('легенда', () => page.evaluate(async ({ row
   return { ok: true, icons: imgs.length, broken: bad, box: [Math.round(bb.left), Math.round(bb.top), Math.round(bb.width), Math.round(bb.height)] };
 }, { rows: LEGEND_ROWS, title: LEGEND_TITLE, note: LEGEND_NOTE }), null);
 console.log('Легенда:', legendInfo ? JSON.stringify(legendInfo) : '⚠️ НЕ вдалося побудувати');
-await page.waitForTimeout(500);
-let shot;
-try { shot = await page.screenshot({ type: 'jpeg', quality: 85 }); }
-catch (e) { await fail('Не вдалося зробити скріншот: ' + (e && e.message)); }
-await browser.close();
-
-const text = r.n ? r.html : '✅ Активних цілей немає';
-const form = new FormData();
-form.append('chat_id', TG_CHAT_ID);
-form.append('parse_mode', 'HTML');
-form.append('disable_web_page_preview', 'true');
-let sendOk = true;
-const check = (label, res) => {
-  console.log(label, JSON.stringify(res).slice(0, 300));
-  if (!res || !res.ok) { sendOk = false; console.log(`::error::Telegram ${label}: ${res && res.description}`); }
-};
-if (text.length <= 1000) {
-  form.append('caption', text);
-  form.append('photo', new Blob([shot], { type: 'image/jpeg' }), 'map.jpg');
-  check('sendPhoto', await api('sendPhoto', form));
-} else {
-  const f1 = new FormData(); f1.append('chat_id', TG_CHAT_ID); f1.append('photo', new Blob([shot], { type: 'image/jpeg' }), 'map.jpg');
-  check('sendPhoto', await api('sendPhoto', f1));
-  form.append('text', text);
-  check('sendMessage', await api('sendMessage', form));
+  await page.waitForTimeout(500);
 }
-if (!sendOk) process.exit(1);
+async function takeShot() {
+  await prepareShot();
+  await safe('__launchTrigger', () => page.evaluate(t => (window.__launchTrigger ? window.__launchTrigger(t) : -1), mapTriggers), -1);
+  await page.waitForTimeout(1200);
+  return page.screenshot({ type: 'jpeg', quality: 85 });
+}
+async function sendReport(text) {
+  const shot = await takeShot();
+  const form = new FormData();
+  form.append('chat_id', TG_CHAT_ID);
+  form.append('parse_mode', 'HTML');
+  form.append('disable_web_page_preview', 'true');
+  let ok = true;
+  const check = (label, res) => { console.log(label, JSON.stringify(res).slice(0, 300)); if (!res || !res.ok) { ok = false; console.log(`::warning::Telegram ${label}: ${res && res.description}`); } };
+  if (text.length <= 1000) {
+    form.append('caption', text);
+    form.append('photo', new Blob([shot], { type: 'image/jpeg' }), 'map.jpg');
+    check('sendPhoto', await api('sendPhoto', form));
+  } else {
+    const f1 = new FormData(); f1.append('chat_id', TG_CHAT_ID); f1.append('photo', new Blob([shot], { type: 'image/jpeg' }), 'map.jpg');
+    check('sendPhoto', await api('sendPhoto', f1));
+    form.append('text', text);
+    check('sendMessage', await api('sendMessage', form));
+  }
+  return ok;
+}
+
+// зведення по категорії цілей на карті: 'missile' (ракети, раз на MISSILE_MIN) і 'drone' (загальна ситуація по БпЛА, раз на SITUATION_MIN)
+async function summaryPass(key, cat, label) {
+  if (!due(key)) return;
+  const r = await page.evaluate(c => window.__tgBuild(c), cat);
+  console.log(`${label}: цілей ${r.n} | відсічено: ТОТ ${r.skippedOcc}, поза Україною ${r.skippedOutside}, літаки ${r.skippedPlanes} | DeepState: ${r.occReady}`);
+  if (!r.n) {
+    if (key === 'situation' && !SKIP_IF_EMPTY && await sendReport('✅ Активних цілей немає')) mark(key);
+    return;                                           // порожнє зведення не надсилаємо і таймер не скидаємо
+  }
+  if (await sendReport(r.html)) mark(key);
+}
+
+
+// ══ ГОЛОВНИЙ ЦИКЛ ══
+// Перша передача новин — одразу (без очікування карти). Далі кожні POLL_SEC секунд: новини (балістика/пуски/доставка), ракети, загальна ситуація, КАБ.
+// RUN_SEC=0 — один прохід (після очікування карти) і вихід; RUN_SEC>0 — безперервна робота, у GitHub Actions ставимо ~20000 (5 год 40 хв).
+if (NEWS_LAUNCHES) {
+  await page.waitForFunction(() => (window._dimapNewsHistory && window._dimapNewsHistory.length) || (window._dimapNews && window._dimapNews.length), null, { timeout: NEWS_WAIT_MS })
+    .catch(() => console.log('⚠️ Стрічка новин не завантажилась за відведений час — пробую з тим, що є.'));
+}
+const endAt = Date.now() + RUN_SEC * 1000;
+let lastReload = Date.now(), fails = 0;
+console.log(`Старт: балістика ${BALLISTIC_MIN} хв, пуски БпЛА ${LAUNCH_MIN} хв, ракети ${MISSILE_MIN} хв, ситуація ${SITUATION_MIN} хв; працюю ${RUN_SEC || 0} с`);
+for (;;) {
+  try {
+    if (NEWS_LAUNCHES) await newsPass();
+    if (!RUN_SEC && Date.now() < mapReadyAt) await page.waitForTimeout(mapReadyAt - Date.now());
+    if (Date.now() >= mapReadyAt) {
+      await safe('ракети', () => summaryPass('missile', 'missile', 'Ракети'));
+      await safe('ситуація', () => summaryPass('situation', 'drone', 'Ситуація БпЛА'));
+      await safe('КАБ', kabPass);
+    }
+    fails = 0;
+  } catch (e) {
+    fails++;
+    console.log(`::warning::Цикл: ${one(e && e.message)} (підряд ${fails})`);
+    if (fails >= 6) await fail('Сторінка не відповідає 6 разів поспіль — завершую, наступний запуск почне з нуля.');
+  }
+  if (!RUN_SEC || Date.now() + POLL_SEC * 1000 >= endAt) break;
+  if (Date.now() - lastReload > RELOAD_MIN * 60000) {            // профілактичне перезавантаження
+    lastReload = Date.now();
+    await safe('reload', async () => { await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }); await hooksReady(); shotReady = false; });
+  }
+  await page.waitForTimeout(POLL_SEC * 1000);
+}
+saveState();
+await browser.close();
+console.log('Готово.');
