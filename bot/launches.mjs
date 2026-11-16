@@ -39,12 +39,32 @@ const REGIONS = [
 ];
 
 const MISSILES = [
-  ['Іскандер-М', /[іиi]скандер-?\s?м|[іиi]скандер/u],
-  ['КН-23',      /[kк][нh]-?23/u],
-  ['С-300',      /[cс]-?300/u],
-  ['С-400',      /[cс]-?400/u],
-  ['Кинджал',    /кинджал|кинжал/u],
-  ['Циркон',     /циркон/u],
+  ['Іскандер-М', /[іиi]скандер(?!-?\s?к(?![\p{L}]))/u],      // «Іскандер-К» — крилата, її не чіпаємо
+  ['КН-23',      /[kк][нh]-?\s?23/u],
+  ['С-300',      /(?:^|[^\p{L}])[cс]-?\s?300/u],
+  ['С-400',      /(?:^|[^\p{L}])[cс]-?\s?400/u],
+  ['Кинджал',    /кинджал|кинжал|[хx]-?47/u],
+  ['Циркон',     /[цз][иі]ркон/u],
+  ['Точка-У',    /точк[аиіу]-?\s?[уu](?![\p{L}])|тот?чка-?у/u],
+  ['Орєшнік',    /[оo]р[єе]шн[іи]к/u],
+  ['Фатех',      /фат[еє]х|fath-?3/u],
+];
+
+// ── Словники розпізнавання ──
+// «БР» як окреме слово = балістична ракета. С-300/С-400 рахуємо балістикою лише коли у реченні немає БпЛА (там це «типу С-300»).
+const BALL_STRONG = /баліст|баллист|(?:^|[^\p{L}])бр(?![\p{L}])|[іиi]скандер(?!-?\s?к(?![\p{L}]))|[kк][нh]-?\s?23|кинджал|кинжал|[хx]-?47|[цз][иі]ркон|точк[аиіу]-?\s?[уu](?![\p{L}])|[оo]р[єе]шн[іи]к|фат[еє]х/u;
+const BALL_WEAK   = /(?:^|[^\p{L}])[cс]-?\s?(?:300|400)/u;
+const DRONE_RE    = /бпла|бпак|шахед|shahed|герань|geran|гербер|дрон|мопед|безп[іи]лот|беспилот|камікадзе|камикадзе/u;
+const THREAT_RE   = /можлив|ймов[іи]рн|в[іі]рогідн|загроз|небезпек|возможн|вероятн|угроз|опасн|готу(?:ють|єтьс|ються|ют)|підготов|подготов|готов\p{L}*\s+(?:до|к)\s|очіку|ожида/u;
+const LAUNCH_RE   = /(?:^|[^\p{L}])(?:пуск|запуск|запущен|запустил|запустили|запущено|стартува|стартов|старт(?![\p{L}])|взл[её]т|злет|злетіл|вилет|вилітає|виліт|вышл|вийшл|вийшов|випущен|випустил|кинул)/u;
+const NEG_RE      = /в[іи]дб[іо]й|відсутн|не\s+(?:зафіксов|фіксу|відбув|зафиксир|фиксир|було)|нем[аєе]є?\s+(?:пуск|запуск)|без\s+пуск/u;
+// доставка / переміщення: «доставили шахеди залізницею», «прибув ешелон з БР», «доставка БР до Нявлі»
+const DELIV_RE    = /достав|довез|довоз|завез|завоз|привез|привоз|ешелон|эшелон|потяг|поезд|вагон|залізнич|железнодорож|перекид|переброс|розвантаж|разгруз|парті(?:я|ї)\s+(?:шахед|бпла|ракет)/u;
+const TRANSPORTS = [
+  ['залізницею',    /ешелон|эшелон|потяг|поезд|вагон|залізнич|железнодорож|(?:^|[^\p{L}])жд(?![\p{L}])|цистерн/u],
+  ['автотранспортом', /фур|колон|автотранспорт|вантажів|грузовик|камаз|трейлер|тягач|автомоб/u],
+  ['повітрям',      /літак|самол[её]т|ил-?76|іл-?76|борт|вертол/u],
+  ['морем',         /судн|корабл|паром|порт(?![\p{L}])|морем/u],
 ];
 
 // Нормалізація: нижній регістр, ё→е, апострофи, латинські «двійники» не чіпаємо (вони у регексах)
@@ -87,6 +107,30 @@ function applyCounts(ev, st) {
 }
 const HAS_COUNT = /реактивн|звичайн|поршнев|класичн|\d{1,3}\s*(?:бпла|шахед|shahed|дрон|груп)/u;
 
+
+// ── Доставка: «на Нявлю доставили ешелон з шахедами», «БР доставляють залізницею до Курська», «доставка 20 шахедів в Єйськ» ──
+const DELIV_PLACE = /(?:^|[\s(])(?:до|на|в|у|во|к|в)\s+([A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,}(?:\s+[A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,})?)/u;
+function parseDelivery(clause, t, { ball, drone }) {
+  const cargo = [];
+  if (drone) cargo.push('shahed');
+  if (ball) cargo.push('ballistic');
+  if (!cargo.length) cargo.push('missile');
+  const transport = (TRANSPORTS.find(([, re]) => re.test(t)) || [null])[0];
+  const missiles = MISSILES.filter(([, re]) => re.test(t)).map(([n]) => n);
+  const cm = /(\d{1,4})\s*(?:шт\.?\s*)?(?:бпла|шахед\p{L}*|shahed|дрон\p{L}*|ракет\p{L}*|бр(?![\p{L}])|вагон\p{L}*|ешелон\p{L}*|эшелон\p{L}*)/u.exec(t);
+  const count = cm ? Number(cm[1]) : null;
+  const unitWagons = !!(cm && /вагон/u.test(cm[0]));
+  const base = { kind: 'delivery', status: 'delivery', cargo, transport, missiles, count, unitWagons };
+  const sites = siteIn(t);
+  if (sites.length) return sites.map(site => ({ ...base, site, region: site.region }));
+  const ro = regionObjIn(t);
+  if (ro) return [{ ...base, site: { id: null, name: ro.name, region: null }, region: ro.name }];
+  const g = DELIV_PLACE.exec(clause);
+  const bad = /^(?:бпла|шахед|бр|баліст)/i;
+  if (g && !bad.test(g[1])) return [{ ...base, site: { id: null, name: g[1].trim(), region: null }, region: null }];
+  return [{ ...base, site: { id: null, name: 'місце не уточнено', region: null }, region: null }];
+}
+
 export function parseNews(rawText) {
   const text = String(rawText || '');
   const events = [];
@@ -98,12 +142,27 @@ export function parseNews(rawText) {
   const clauses = text.split(/⚠️+|\n|\+|(?<=[.!?])\s+/u).map(s => s.trim()).filter(Boolean);
   for (const clause of clauses) {
     const t = norm(clause);
-    const isThreat = /можлив|загроз|угроз/u.test(t);
-    const isLaunch = /(?:відбул\p{L}*|зафіксов\p{L}*|зафиксир\p{L}*)\s+пуск|(?:^|[^\p{L}])пуски/u.test(t);
-    const ball = /баліст|баллист|[іиi]скандер|[kк][нh]-?23|[cс]-?300|[cс]-?400|кинджал|кинжал|циркон/u.test(t);
-    const drone = /бпла|шахед|shahed|герань|geran|дрон/u.test(t);
+    if (NEG_RE.test(t)) continue;                               // «відбій», «пусків не зафіксовано»
+    const isThreat = THREAT_RE.test(t);
+    const isLaunch = LAUNCH_RE.test(t);
+    const drone = DRONE_RE.test(t);
+    const ball = BALL_STRONG.test(t) || (!drone && BALL_WEAK.test(t));
+    const cargo = ball || drone || /ракет/u.test(t);
+    // ── ДОСТАВКА (БР / шахеди): окремий тип події ──
+    if (cargo && DELIV_RE.test(t) && !(isLaunch && !/достав|ешелон|эшелон|потяг|поезд|вагон/u.test(t))) {
+      events.push(...parseDelivery(clause, t, { ball, drone }));
+      continue;
+    }
     if (!(isThreat || isLaunch) || !(ball || drone)) continue;
-
+    if (ball && drone && isLaunch && !isThreat) {                // «пуски шахедів та БР»: окремо додаємо балістику
+      const where0 = /(?:^|\s)(?:з|із|с|со|из)\s+([^.!?,;()«»]+)/u.exec(t);
+      const ros0 = []; for (const r of REGIONS) if (where0 && r.re.test(where0[1]) && !ros0.some(x => x.id === r.id)) ros0.push(r);
+      const mis0 = MISSILES.filter(([, re]) => re.test(t)).map(([n]) => n);
+      if (BALL_STRONG.test(t)) {
+        if (!ros0.length) events.push({ kind: 'ballistic', status: 'launch', region: null, regionId: null, missiles: mis0 });
+        else for (const ro of ros0) events.push({ kind: 'ballistic', status: 'launch', region: ro.name, regionId: ro.id, missiles: mis0 });
+      }
+    }
     if (ball && !drone) {                         // ── БАЛІСТИКА ──
       const missiles = MISSILES.filter(([, re]) => re.test(t)).map(([n]) => n);
       // регіон беремо після «з/із/с/из» — щоб «типу С-300» не плутати з місцем
@@ -156,7 +215,9 @@ export function parseNews(rawText) {
 export function mergeEvents(list) {
   const m = new Map();
   for (const e of list) {
-    const key = e.kind === 'drone' ? `drone|${e.site.id || e.site.name}` : `bal|${e.status}|${e.region || 'any'}`;
+    const key = e.kind === 'drone' ? `drone|${e.site.id || e.site.name}`
+      : e.kind === 'delivery' ? `deliv|${e.site.id || e.site.name}`
+      : `bal|${e.status}|${e.region || 'any'}`;
     const o = m.get(key);
     if (!o) { m.set(key, { ...e, key }); continue; }
     if (e.groups != null) o.groups = Math.max(o.groups || 0, e.groups);
@@ -166,6 +227,11 @@ export function mergeEvents(list) {
     if (e.unit === 'groups') o.unit = 'groups';
     if (e.note && !o.note) o.note = e.note;
     if (e.missiles) o.missiles = [...new Set([...(o.missiles || []), ...e.missiles])];
+    if (e.kind === 'delivery') {
+      o.cargo = [...new Set([...(o.cargo || []), ...(e.cargo || [])])];
+      if (e.transport && !o.transport) o.transport = e.transport;
+      if (e.count != null && (o.count == null || e.count > o.count)) { o.count = e.count; o.unitWagons = e.unitWagons; }
+    }
   }
   // «загальну» тривогу без місця прибираємо, якщо є така сама з конкретним регіоном;
   // типи ракет із загальної тривоги додаємо до конкретних
@@ -185,6 +251,17 @@ const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(
 // ── Текст повідомлення для каналу ──
 export function formatEvents(events, footerHtml) {
   const blocks = [];
+  // балістика — першою: це найтерміновіше
+  for (const status of ['launch', 'threat']) {
+    const bs = events.filter(e => e.kind === 'ballistic' && e.status === status);
+    if (!bs.length) continue;
+    const head = status === 'launch' ? '🚀🔴 Пуски балістики' : '🚨 Загроза застосування балістики';
+    const lines = bs.map(b => {
+      const mis = b.missiles && b.missiles.length ? b.missiles.join(' / ') : '';
+      return '📍 ' + esc(b.region || 'місце не уточнено') + (mis ? ' — ' + esc(mis) : '');
+    });
+    blocks.push(head + '\n' + lines.join('\n'));
+  }
   const drones = events.filter(e => e.kind === 'drone');
   if (drones.length) {
     const allShahed = drones.every(d => d.droneType === 'shahed');
@@ -192,21 +269,29 @@ export function formatEvents(events, footerHtml) {
       const place = d.site.region ? `${d.site.name} (${d.site.region})` : d.site.name;
       const parts = [];
       if (d.groups != null) parts.push(`${d.groups} ${plural(d.groups)}`);
-      if (d.jet) parts.push('реактивні');
+      else if (d.normal || d.jetN) {                                   // «…з Курська, 3 групи» / «10 звичайних, 8 реактивних»
+        const u = n => d.unit === 'groups' ? ' ' + plural(n) : '';
+        if (d.normal) parts.push(`${d.normal}${u(d.normal)} звичайних`);
+        if (d.jetN) parts.push(`${d.jetN}${u(d.jetN)} реактивних`);
+      }
+      if (d.jet && !d.jetN) parts.push('реактивні');
       if (d.note) parts.push(d.note);
       return '📍 ' + esc(place) + (parts.length ? ' — ' + esc(parts.join(', ')) : '');
     });
     blocks.push('🚀 Пуски БпЛА' + (allShahed ? ' (Shahed)' : '') + '\n' + lines.join('\n'));
   }
-  for (const status of ['launch', 'threat']) {
-    const bs = events.filter(e => e.kind === 'ballistic' && e.status === status);
-    if (!bs.length) continue;
-    const head = status === 'launch' ? '🚀 Пуски балістики' : '🚨 Загроза застосування балістики';
-    const lines = bs.map(b => {
-      const mis = b.missiles && b.missiles.length ? b.missiles.join(' / ') : '';
-      return '📍 ' + esc(b.region || 'місце не уточнено') + (mis ? ' — ' + esc(mis) : '');
+  const dl = events.filter(e => e.kind === 'delivery');
+  if (dl.length) {
+    const CARGO = { shahed: 'Shahed / БпЛА', ballistic: 'БР', missile: 'ракети' };
+    const lines = dl.map(d => {
+      const place = d.site.region ? `${d.site.name} (${d.site.region})` : d.site.name;
+      const parts = [(d.cargo || []).map(c => CARGO[c] || c).join(' + ')];
+      if (d.missiles && d.missiles.length) parts.push(d.missiles.join(' / '));
+      if (d.count != null) parts.push(d.count + (d.unitWagons ? ' вагонів' : ' шт.'));
+      if (d.transport) parts.push(d.transport);
+      return (d.transport === 'залізницею' ? '🚆 ' : '📦 ') + esc(place) + ' — ' + esc(parts.filter(Boolean).join(', '));
     });
-    blocks.push(head + '\n' + lines.join('\n'));
+    blocks.push('📦 Доставка\n' + lines.join('\n'));
   }
   return blocks.length ? blocks.join('\n\n') + (footerHtml ? '\n\n' + footerHtml : '') : '';
 }
@@ -214,7 +299,7 @@ export function formatEvents(events, footerHtml) {
 // ── Що з новин варто публікувати зараз ──
 // raw: [{ id, date, text }]; state.news.sent: { [key]: { t, g } }
 // Повертає { events, stamps:[[key,{t,g}]], stats }. Нічого не змінює у state.
-const TTL_MIN = { drone: 45, launch: 45, threat: 60 };
+const TTL_MIN = { drone: 45, launch: 45, threat: 60, delivery: 180 };
 export function pickNewEvents(raw, state, now, { maxAgeMin = 20 } = {}) {
   const sent = (state && state.news && state.news.sent) || {};
   const stats = { total: raw.length, fresh: 0, noDate: 0, parsed: 0 };
@@ -231,12 +316,14 @@ export function pickNewEvents(raw, state, now, { maxAgeMin = 20 } = {}) {
   const merged = mergeEvents(events);
   const out = [], stamps = [];
   for (const e of merged) {
-    const ttl = (e.kind === 'drone' ? TTL_MIN.drone : TTL_MIN[e.status]) * 60000;
+    const ttl = (e.kind === 'drone' ? TTL_MIN.drone : TTL_MIN[e.status] || 60) * 60000;
     const prev = sent[e.key];
     const more = (e.groups || 0) > ((prev && prev.g) || 0);
-    if (prev && now - prev.t <= ttl && !more) continue;       // уже публікували нещодавно
+    const mis = (e.missiles || []).length;
+    const moreMis = mis > ((prev && prev.m) || 0);              // з'явився новий тип ракети — це нова інформація
+    if (prev && now - prev.t <= ttl && !more && !moreMis) continue;   // уже публікували нещодавно
     out.push(e);
-    stamps.push([e.key, { t: now, g: e.groups || 0 }]);
+    stamps.push([e.key, { t: now, g: e.groups || 0, m: mis }]);
   }
   return { events: out, stamps, stats, active: merged };
 }

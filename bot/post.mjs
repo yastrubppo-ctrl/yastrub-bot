@@ -6,7 +6,7 @@ const { TG_BOT_TOKEN, TG_CHAT_ID, SITE_URL, VERCEL_BYPASS } = process.env;
 const SKIP_IF_EMPTY = process.env.SKIP_IF_EMPTY !== '0';
 const KAB_ALERTS = process.env.KAB_ALERTS !== '0';                       // KAB_ALERTS=0 вимикає попередження про літаки
 const KAB_COOLDOWN_MIN = Number(process.env.KAB_COOLDOWN_MIN || 60);
-const NEWS_SEND = process.env.NEWS_SEND !== '0';                          // NEWS_SEND=0: НЕ слати пуски в Telegram (це роблять окремі боти), але квадрати на карті блимають
+const NEWS_SEND = process.env.NEWS_SEND !== '0';                          // за замовчуванням пуски шле ЦЕЙ бот (один бот на все). NEWS_SEND=0 — не слати, квадрати на карті все одно блимають
 const NEWS_LAUNCHES = process.env.NEWS_LAUNCHES !== '0';                 // NEWS_LAUNCHES=0 вимикає пуски БпЛА/балістики з новин
 const NEWS_MAX_AGE_MIN = Number(process.env.NEWS_MAX_AGE_MIN || 20);     // беремо новини не старші за стільки хвилин
 const WAIT_MS = Number(process.env.WAIT_MS || 25000);
@@ -87,33 +87,58 @@ try {
     await fail(`Функції бота не з'явились на ${SITE_URL}. ` + (pageErrors.length ? 'Помилка на сторінці: ' + pageErrors[0] : 'Помилок JS немає — перевір, чи задеплоєні index.html і файли поруч (border-data.js, cities_extra.js), та VERCEL_BYPASS.'));
   }
 }
-await page.waitForTimeout(WAIT_MS);
+// Новини беремо ОДРАЗУ, не чекаючи WAIT_MS (він потрібен лише карті): так пуски балістики йдуть у канал за секунди після завантаження стрічки.
+const NEWS_WAIT_MS = Number(process.env.NEWS_WAIT_MS || 15000);           // скільки максимум чекати, поки сайт завантажить стрічку новин
+const NEWS_WATCH_SEC = Number(process.env.NEWS_WATCH_SEC || 0);          // >0: ще стільки секунд перевіряти нові повідомлення кожні 8 с (швидші пуски без частого cron)
 const footerHtml = await safe('__tgFooterHtml', () => page.evaluate(() => (typeof window.__tgFooterHtml === 'function' ? window.__tgFooterHtml() : '')), '');
 
-// ══ 0) ПУСКИ БпЛА / БАЛІСТИКИ З НОВИН ══
+// ══ 0) ПУСКИ БпЛА / БАЛІСТИКИ / ДОСТАВКА З НОВИН — ЄДИНИЙ БОТ ══
+// Повідомлення про пуски шле САМЕ цей бот (NEWS_SEND за замовчуванням увімкнено). Старі окремі боти вимкніть,
+// інакше буде дублювання. Балістика йде ОКРЕМИМ і ПЕРШИМ повідомленням, щоб не чекати БпЛА/доставку.
 let mapTriggers = [];
+const readNews = () => page.evaluate(() => {
+  const arr = (window._dimapNewsHistory && window._dimapNewsHistory.length) ? window._dimapNewsHistory : (window._dimapNews || []);
+  const strip = h => {
+    try {
+      const d = new DOMParser().parseFromString('<body>' + String(h || '').replace(/<br\s*\/?>/gi, ' \n ') + '</body>', 'text/html');
+      return (d.body.textContent || '').replace(/[ \t]+/g, ' ').trim();
+    } catch (e) { return String(h || '').replace(/<[^>]*>/g, ' '); }
+  };
+  return arr.map(n => ({ id: String(n.id != null ? n.id : (n.url || '')), date: n.date || null, text: strip(n.text) })).filter(n => n.text);
+});
+// одна передача: читає стрічку, шле нове (балістика → потім БпЛА + доставка), запам'ятовує надіслане у state
+async function newsPass(label) {
+  const raw = await readNews();
+  const pick = pickNewEvents(raw, state, Date.now(), { maxAgeMin: NEWS_MAX_AGE_MIN });
+  if (pick.active && pick.active.length) mapTriggers = toMapTriggers(pick.active, { threatToo: BALLISTIC_THREAT_BLINK });
+  console.log(`${label}: ${pick.stats.total} у стрічці, свіжих ${pick.stats.fresh}, без дати ${pick.stats.noDate}; подій: ${pick.stats.parsed}; до публікації: ${pick.events.length}`);
+  if (!NEWS_SEND || !pick.events.length) return pick.events.length;
+  const groups = [
+    ['балістика', pick.events.filter(e => e.kind === 'ballistic')],
+    ['БпЛА/доставка', pick.events.filter(e => e.kind !== 'ballistic')],
+  ];
+  for (const [name, evs] of groups) {
+    if (!evs.length) continue;
+    const res = await sendText(formatEvents(evs, footerHtml));
+    console.log(`Пуски з новин (${name}):`, JSON.stringify(res).slice(0, 200));
+    if (res.ok) { evs.forEach(e => { const st = pick.stamps.find(([k]) => k === e.key); if (st) state.news.sent[st[0]] = st[1]; }); saveState(); }
+    else console.log(`::warning::Новини (${name}) не надіслано: ${res.description}`);
+  }
+  return pick.events.length;
+}
 if (NEWS_LAUNCHES) {
   try {
-    const raw = await page.evaluate(() => {
-      const arr = (window._dimapNewsHistory && window._dimapNewsHistory.length) ? window._dimapNewsHistory : (window._dimapNews || []);
-      const strip = h => {
-        try {
-          const d = new DOMParser().parseFromString('<body>' + String(h || '').replace(/<br\s*\/?>/gi, ' \n ') + '</body>', 'text/html');
-          return (d.body.textContent || '').replace(/[ \t]+/g, ' ').trim();
-        } catch (e) { return String(h || '').replace(/<[^>]*>/g, ' '); }
-      };
-      return arr.map(n => ({ id: String(n.id != null ? n.id : (n.url || '')), date: n.date || null, text: strip(n.text) })).filter(n => n.text);
-    });
-    const pick = pickNewEvents(raw, state, Date.now(), { maxAgeMin: NEWS_MAX_AGE_MIN });
-    mapTriggers = toMapTriggers(pick.active, { threatToo: BALLISTIC_THREAT_BLINK });
-    console.log(`Новини: ${pick.stats.total} у стрічці, свіжих ${pick.stats.fresh}, без дати ${pick.stats.noDate}; подій про пуски: ${pick.stats.parsed}; до публікації: ${pick.events.length}`);
-    if (NEWS_SEND && pick.events.length) {
-      const res = await sendText(formatEvents(pick.events, footerHtml));
-      console.log('Пуски з новин:', JSON.stringify(res).slice(0, 200));
-      if (res.ok) { pick.stamps.forEach(([k, v]) => { state.news.sent[k] = v; }); saveState(); }
+    await page.waitForFunction(() => (window._dimapNewsHistory && window._dimapNewsHistory.length) || (window._dimapNews && window._dimapNews.length), null, { timeout: NEWS_WAIT_MS })
+      .catch(() => console.log('⚠️ Стрічка новин не завантажилась за відведений час — пробую з тим, що є.'));
+    await newsPass('Новини');
+    const until = Date.now() + NEWS_WATCH_SEC * 1000;
+    while (Date.now() < until) {
+      await page.waitForTimeout(8000);
+      await safe('newsPass(watch)', () => newsPass('Новини (повтор)'));
     }
   } catch (e) { console.log('⚠️ Новини про пуски: помилка', e && e.message); }
 }
+await page.waitForTimeout(WAIT_MS);   // решта очікування — лише для карти
 
 // ══ 1) ОКРЕМЕ ПОПЕРЕДЖЕННЯ ПРО КАБи (літаки біля областей) ══
 if (KAB_ALERTS) {
