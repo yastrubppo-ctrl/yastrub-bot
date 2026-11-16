@@ -17,12 +17,12 @@ const ALERT_OPACITY = Math.min(100, Math.max(20, Number(process.env.ALERT_OPACIT
 const FRAME_BOUNDS = [[44.3, 22.1], [52.45, 40.3]];                        // межі України (з Кримом)
 const FRAME_PADDING = Number(process.env.FRAME_PADDING || 18);              // відступ від країв кадру, px
 // ── Періодичність повідомлень (хвилини). Один бот, різні типи: ──
-const BALLISTIC_MIN = Number(process.env.BALLISTIC_MIN ?? 1);       // пуски і загроза балістики: щойно з'явились, далі не частіше ніж раз на стільки хвилин
+const BALLISTIC_MIN = Number(process.env.BALLISTIC_MIN ?? 0.25);    // балістика: перше повідомлення — МИТТЄВО; наступні нові цілі збираються не довше ніж стільки хвилин (0.25 = 15 с, щоб залп не дав 10 повідомлень)
 const LAUNCH_MIN    = Number(process.env.LAUNCH_MIN ?? 5);          // пуски БпЛА (+ доставка)
-const MISSILE_MIN   = Number(process.env.MISSILE_MIN ?? 5);         // ракети в повітрі (крилаті, балістичні, Х-101, Калібр, Іскандер-К…; Герань-5 і Бандероль сюди НЕ входять — це БпЛА)
+const MISSILE_MIN   = Number(process.env.MISSILE_MIN ?? 5);         // крилаті та інші ракети в повітрі (Х-101, Калібр, Іскандер-К…; балістика — окремо й миттєво; Герань-5 і Бандероль — це БпЛА)
 const SITUATION_MIN = Number(process.env.SITUATION_MIN ?? 10);      // загальна ситуація по БпЛА (шахеди, реактивні, Герань-5, Бандероль…)
 const RUN_SEC       = Number(process.env.RUN_SEC ?? process.env.NEWS_WATCH_SEC ?? 0);   // скільки секунд працювати безперервно (0 = один прохід і вихід)
-const POLL_SEC      = Number(process.env.POLL_SEC || 10);           // як часто перевіряти стрічку новин
+const POLL_SEC      = Number(process.env.POLL_SEC || 3);            // як часто перевіряти новини і цілі на карті (секунди)
 const RELOAD_MIN    = Number(process.env.RELOAD_MIN || 30);         // перезавантажувати сторінку кожні N хв (проти витоків пам'яті у довгому запуску)
 if (!TG_BOT_TOKEN || !TG_CHAT_ID || !SITE_URL) { console.log('::error::Потрібні TG_BOT_TOKEN, TG_CHAT_ID, SITE_URL (secrets/env у workflow)'); process.exit(1); }
 
@@ -102,7 +102,7 @@ const NEWS_WATCH_SEC = Number(process.env.NEWS_WATCH_SEC || 0);          // >0: 
 const footerHtml = await safe('__tgFooterHtml', () => page.evaluate(() => (typeof window.__tgFooterHtml === 'function' ? window.__tgFooterHtml() : '')), '');
 
 // ── розклад: чи пора слати цей тип ──
-const INTERVAL = { ballistic: BALLISTIC_MIN * 60000, launch: LAUNCH_MIN * 60000, missile: MISSILE_MIN * 60000, situation: SITUATION_MIN * 60000 };
+const INTERVAL = { ballistic: BALLISTIC_MIN * 60000, ballisticLive: BALLISTIC_MIN * 60000, launch: LAUNCH_MIN * 60000, missile: MISSILE_MIN * 60000, situation: SITUATION_MIN * 60000 };
 const due = k => Date.now() - (state.sched[k] || 0) >= INTERVAL[k];
 const mark = k => { state.sched[k] = Date.now(); saveState(); };
 const mapReadyAt = Date.now() + WAIT_MS;                                  // карті потрібен час, щоб намалювати цілі
@@ -299,6 +299,19 @@ async function sendReport(text) {
   return ok;
 }
 
+// ── БАЛІСТИКА З КАРТИ (kn23, iskanderm, Кинджал, Орєшнік…): шлемо ТЕКСТ одразу, без скріншота (скрін додає секунди) ──
+// Нова ціль = кількість балістичних цілей зросла. Перша — миттєво; наступні, що з'явились протягом BALLISTIC_MIN, йдуть одним повідомленням.
+let ballSeen = 0;
+async function ballisticLivePass() {
+  const r = await page.evaluate(() => window.__tgBuild('ballistic'));
+  if (!r.n) { ballSeen = 0; return; }
+  if (r.n <= ballSeen) { ballSeen = r.n; return; }          // нових цілей нема (або частина вже зникла)
+  if (!due('ballisticLive')) return;                         // зачекаємо до кінця паузи — відправиться на одній з наступних перевірок
+  const res = await sendText(r.html);
+  console.log(`Балістика (карта): цілей ${r.n}, було ${ballSeen}`, JSON.stringify(res).slice(0, 160));
+  if (res.ok) { ballSeen = r.n; mark('ballisticLive'); }
+}
+
 // зведення по категорії цілей на карті: 'missile' (ракети, раз на MISSILE_MIN) і 'drone' (загальна ситуація по БпЛА, раз на SITUATION_MIN)
 async function summaryPass(key, cat, label) {
   if (!due(key)) return;
@@ -327,6 +340,7 @@ for (;;) {
     if (NEWS_LAUNCHES) await newsPass();
     if (!RUN_SEC && Date.now() < mapReadyAt) await page.waitForTimeout(mapReadyAt - Date.now());
     if (Date.now() >= mapReadyAt) {
+      await safe('балістика', ballisticLivePass);
       await safe('ракети', () => summaryPass('missile', 'missile', 'Ракети'));
       await safe('ситуація', () => summaryPass('situation', 'drone', 'Ситуація БпЛА'));
       await safe('КАБ', kabPass);
