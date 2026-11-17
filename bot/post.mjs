@@ -103,7 +103,11 @@ const footerHtml = await safe('__tgFooterHtml', () => page.evaluate(() => (typeo
 
 // ── розклад: чи пора слати цей тип ──
 const INTERVAL = { ballistic: BALLISTIC_MIN * 60000, ballisticLive: BALLISTIC_MIN * 60000, launch: LAUNCH_MIN * 60000, missile: MISSILE_MIN * 60000, situation: SITUATION_MIN * 60000 };
-const due = k => Date.now() - (state.sched[k] || 0) >= INTERVAL[k];
+// Допуск на «розклад від cron»: у режимі одного проходу (RUN_SEC=0) запуски йдуть раз на N хв, і час перевірки гуляє на ±десятки секунд
+// (черга GitHub, довжина запуску). Якщо вимагати рівно INTERVAL, то перевірка «через 9:55 замість 10:00» пропускається і повідомлення
+// виходить лише раз на 2 запуски — тобто раз на 20 хв замість 10. Тому вважаємо «пора», коли минуло INTERVAL мінус допуск (не більше 30% інтервалу).
+const SLACK_MS = RUN_SEC ? 0 : Number(process.env.SCHED_SLACK_SEC ?? 150) * 1000;
+const due = k => Date.now() - (state.sched[k] || 0) >= INTERVAL[k] - Math.min(SLACK_MS, INTERVAL[k] * 0.3);
 const mark = k => { state.sched[k] = Date.now(); saveState(); };
 const mapReadyAt = Date.now() + WAIT_MS;                                  // карті потрібен час, щоб намалювати цілі
 
@@ -334,7 +338,7 @@ if (NEWS_LAUNCHES) {
 }
 const endAt = Date.now() + RUN_SEC * 1000;
 let lastReload = Date.now(), fails = 0;
-console.log(`Старт: балістика ${BALLISTIC_MIN} хв, пуски БпЛА ${LAUNCH_MIN} хв, ракети ${MISSILE_MIN} хв, ситуація ${SITUATION_MIN} хв; працюю ${RUN_SEC || 0} с`);
+console.log(`Старт: балістика ${BALLISTIC_MIN} хв, пуски БпЛА ${LAUNCH_MIN} хв, ракети ${MISSILE_MIN} хв, ситуація ${SITUATION_MIN} хв; працюю ${RUN_SEC || 0} с; допуск розкладу ${Math.round(SLACK_MS / 1000)} с`);
 for (;;) {
   try {
     if (NEWS_LAUNCHES) await newsPass();
