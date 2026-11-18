@@ -6,10 +6,10 @@ const SITES = [
   { id: 'akhtarsk',  name: 'Приморсько-Ахтарськ', region: 'Краснодарський край', re: /приморс\p{L}*[-\s]?ахтар|прим[-.\s]?ахтар|ахтарс|ахтарк/u },
   { id: 'kursk',     name: 'Курськ',              region: 'Курська обл.',        re: /курськ|курск|халін|халин/u },
   { id: 'millerovo', name: 'Міллерово',           region: 'Ростовська обл.',     re: /м[іи]ллер[еоі]в/u },
-  { id: 'donetsk',   name: 'Донецьк',             region: 'окупований',          re: /донецьк|донецк/u },
+  { id: 'donetsk',   name: 'Донецьк',             region: 'окупований',          re: /донецьк(?:а|у|ом|ому)?(?![\p{L}])(?!\s+обл)|донецк(?![\p{L}])/u },   // не «Донецька область»
   { id: 'gvard',     name: 'Гвардійське',         region: 'Крим',                re: /гвард[іие][йи]с[ь]?к/u },
   { id: 'chauda',    name: 'Чауда',               region: 'Крим',                re: /чауд/u },
-  { id: 'orel',      name: 'Орел',                region: 'Орловська обл.',      re: /цимбулов|(?:^|[^\p{L}])(?:орл\p{L}*|орел|орёл)(?![\p{L}])/u },
+  { id: 'orel',      name: 'Орел',                region: 'Орловська обл.',      re: /цимбулов|(?:^|[^\p{L}])(?:орл(?:а|у|ом|і|е|ові)?|орел|орёл)(?![\p{L}])/u },   // не «Орлівка»
   { id: 'shatalovo', name: 'Шаталове',            region: 'Смоленська обл.',     re: /шатал[оа]в/u },
   { id: 'nyavlya',   name: 'Нявля',               region: 'Брянська обл.',       re: /нявл|навл[яеі]/u },
   { id: 'berdyansk', name: 'Бердянськ',           region: 'окупований',          re: /бердянськ|бердянск/u },
@@ -20,7 +20,10 @@ const SITES = [
   { id: 'mozdok',    name: 'Моздок',              region: 'Північна Осетія',     re: /моздок/u },
   { id: 'morozovsk', name: 'Морозовськ',          region: 'Ростовська обл.',     re: /морозовськ|морозовск/u },
   { id: 'engels',    name: 'Енгельс',             region: 'Саратовська обл.',    re: /енгельс|энгельс/u },
+  // акваторія (пуски з моря): маркера аеродрому нема, на карті — тимчасова точка в морі; у доставці не бере участі
+  { id: 'azov',      name: 'Азовське море',       region: 'акваторія',           re: /азовськ\p{L}*\s+мор|азовск\p{L}*\s+мор|акватор\p{L}*\s+азов/u },
 ];
+const NO_DELIVERY = new Set(['azov']);   // у море нічого не «доставляють»
 
 // ── Регіони для балістики («з Брянську» → Брянська область) ──
 const REGIONS = [
@@ -34,8 +37,8 @@ const REGIONS = [
   { id: 'astrakhan', name: 'Астраханська область (Капустін Яр)', re: /астрахан|капуст[іи]н/u },
   { id: 'crimea',    name: 'Крим',                  re: /(?:^|[^\p{L}])крим|(?:^|[^\p{L}])крым/u },
   { id: 'smolensk',  name: 'Смоленська область',    re: /смоленськ|смоленск|шатал/u },
-  { id: 'oryol',     name: 'Орловська область',     re: /орловськ|орловск|(?:^|[^\p{L}])орл|(?:^|[^\p{L}])орел|цимбулов/u },
-  { id: 'donetsk',   name: 'Донеччина (окупована)', re: /донецьк|донецк/u },
+  { id: 'oryol',     name: 'Орловська область',     re: /орловськ|орловск|(?:^|[^\p{L}])(?:орл(?:а|у|ом|і|е|ові)?|орел)(?![\p{L}])|цимбулов/u },
+  { id: 'donetsk',   name: 'Донеччина (окупована)', re: /донецьк(?:а|у|ом|ому)?(?![\p{L}])(?!\s+обл)|донецк(?![\p{L}])/u },
 ];
 
 const MISSILES = [
@@ -54,7 +57,8 @@ const MISSILES = [
 // «БР» як окреме слово = балістична ракета. С-300/С-400 рахуємо балістикою лише коли у реченні немає БпЛА (там це «типу С-300»).
 const BALL_STRONG = /баліст|баллист|(?:^|[^\p{L}])бр(?![\p{L}])|[іиi]скандер(?!-?\s?к(?![\p{L}]))|[kк][нh]-?\s?23|кинджал|кинжал|[хx]-?47|[цз][иі]ркон|точк[аиіу]-?\s?[уu](?![\p{L}])|[оo]р[єе]шн[іи]к|фат[еє]х/u;
 const BALL_WEAK   = /(?:^|[^\p{L}])[cс]-?\s?(?:300|400)/u;
-const DRONE_RE    = /бпла|бпак|шахед|shahed|герань|geran|гербер|дрон|мопед|безп[іи]лот|беспилот|камікадзе|камикадзе/u;
+const DRONE_RE    = /бпла|бпак|шахед|shahed|герань|geran|гербер|дрон|мопед|безп[іи]лот|беспилот|камікадзе|камикадзе|бандерол|banderol/u;
+const BANDEROL_RE = /бандерол|banderol/u;
 const THREAT_RE   = /можлив|ймов[іи]рн|в[іі]рогідн|загроз|небезпек|возможн|вероятн|угроз|опасн|готу(?:ють|єтьс|ються|ют)|підготов|подготов|готов\p{L}*\s+(?:до|к)\s|очіку|ожида/u;
 const LAUNCH_RE   = /(?:^|[^\p{L}])(?:пуск|запуск|запущен|запустил|запустили|запущено|стартува|стартов|старт(?![\p{L}])|взл[её]т|злет|злетіл|вилет|вилітає|виліт|вышл|вийшл|вийшов|випущен|випустил|кинул)/u;
 const NEG_RE      = /в[іи]дб[іо]й|відсутн|не\s+(?:зафіксов|фіксу|відбув|зафиксир|фиксир|було)|нем[аєе]є?\s+(?:пуск|запуск)|без\s+пуск/u;
@@ -84,6 +88,21 @@ const norm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[�
 const plural = n => (n % 10 === 1 && n % 100 !== 11) ? 'група'
   : ([2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100)) ? 'групи' : 'груп';
 
+// Куди летять / що атакуватимуть: «атакувати Миколаївщину/Одещину», «на Одещину», «у бік Херсонщини»
+const TARGET_REGIONS = [
+  ['Миколаївщина', /миколаїв|николаев/u], ['Одещина', /одес|одещ|одесс/u], ['Херсонщина', /херсон/u],
+  ['Запоріжжя', /запор[іi]ж|запорож/u], ['Дніпропетровщина', /дніпр|днепр/u], ['Харківщина', /харків|харьков/u],
+  ['Полтавщина', /полтав/u], ['Сумщина', /сумщин|сумськ|(?:^|[^\p{L}])сум(?:и|ах|ами)(?![\p{L}])/u],
+  ['Чернігівщина', /черніг|чернигов/u], ['Київщина', /київ|киев/u], ['Кіровоградщина', /кіровоград|кропивниц/u],
+  ['Черкащина', /черкащ|черкас/u], ['Вінниччина', /вінниц|вінничч/u], ['Житомирщина', /житомир/u],
+  ['Львівщина', /львів|львов/u], ['Донеччина', /донеччин/u],
+];
+const TARGET_TRIGGER = /(?:атакув\p{L}*|ударит\p{L}*|удар\p{L}*\s+по|ц[іе]л\p{L}*|курсом\s+на|(?:у|в)\s+б[іi]к|(?:^|[^\p{L}])(?:на|по))\s+([^.!?;]+)/u;
+function targetsIn(t) {
+  const m = TARGET_TRIGGER.exec(t); if (!m) return [];
+  return TARGET_REGIONS.filter(([, re]) => re.test(m[1])).map(([n]) => n);
+}
+
 const siteIn = t => SITES.filter(s => s.re.test(t));
 const regionObjIn = t => REGIONS.find(r => r.re.test(t)) || null;
 const regionIn = t => (regionObjIn(t) || {}).name || null;
@@ -100,7 +119,7 @@ function droneCounts(st) {
     ?? num(new RegExp('реактивн\\p{L}*(?:\\s+(?:бпла|шахед\\p{L}*|дрон\\p{L}*))?\\s*[-–—:(]?\\s*(\\d{1,3})' + NOT_MORE, 'u'));
   const normal = num(/(\d{1,3})\s*(?:шт\.?\s*)?(?:звичайн|поршнев|класичн)\p{L}*/u)
     ?? num(new RegExp('(?:звичайн|поршнев|класичн)\\p{L}*(?:\\s+(?:бпла|шахед\\p{L}*|дрон\\p{L}*))?\\s*[-–—:(]?\\s*(\\d{1,3})' + NOT_MORE, 'u'));
-  const unq = num(/(\d{1,3})\s*(?:бпла|шахед\p{L}*|shahed|дрон\p{L}*|груп\p{L}*)/u);
+  const unq = num(/(\d{1,3})\s*(?:бпла|шахед\p{L}*|shahed|дрон\p{L}*|бандерол\p{L}*|banderol|груп\p{L}*)/u);
   return { normal, jet, unq };
 }
 // дописує кількості в подію (бере максимум, якщо одну й ту саму подію бачимо кілька разів)
@@ -116,11 +135,16 @@ function applyCounts(ev, st) {
   if (/груп/u.test(st)) ev.unit = 'groups';
   if (jetWord) ev.jet = true;
 }
-const HAS_COUNT = /реактивн|звичайн|поршнев|класичн|\d{1,3}\s*(?:бпла|шахед|shahed|дрон|груп)/u;
+const HAS_COUNT = /реактивн|звичайн|поршнев|класичн|\d{1,3}\s*(?:бпла|шахед|shahed|дрон|бандерол|banderol|груп)/u;
 
 
 // ── Доставка: «на Нявлю доставили ешелон з шахедами», «БР доставляють залізницею до Курська», «доставка 20 шахедів в Єйськ» ──
-const DELIV_PLACE = /(?:^|[\s(])(?:до|на|в|у|во|к|в)\s+([A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,}(?:\s+[A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,})?)/u;
+const DELIV_PLACE = /(?:^|[\s(])(?:[Дд]о|[Нн]а|[Вв]|[Уу]|[Вв]о|[Кк])\s+([A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,}(?:\s+[A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,})?)/u;
+// «Мукачеве: прибув ешелон…», «Харків — 20 од.» — назва місця на початку рядка (без прийменника)
+const LEAD_PLACE  = /^\s*([A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,}(?:\s+[A-ZА-ЯІЇЄҐ][\p{L}'\-]{3,})?)\s*[:—–]/u;
+const HEADER_WORD = /шахед|бпла|дрон|ракет|баліст|(?:^|[^\p{L}])бр(?![\p{L}])|бандерол|достав|ешелон|потяг|вагон|оновлен|увага|терміново|важлив|нове|нова|зведен|за добу|разом/u;
+// Українські області й міста — це НІКОЛИ не пускова локація: такі події відкидаємо (навіть коли немає прийменника чи великої літери)
+const UA_PLACE = /(?<![\p{L}])(?:харків|харьков|київ|киев|київщин|одес|одещин|миколаїв|херсон|запоріж|дніпр|полтав|сумщин|сумськ|сум(?:и|ах|ами)(?![\p{L}])|черніг|черкас|вінниц|вінничч|житомир|львів|львов|волин|рівн|луцьк|тернопіл|хмельниц|івано-франк|закарпат|мукачев|ужгород|чернівц|кропивниц|кіровоград|кременчу|кривий\s+р[іі]г|кривого\s+рогу|маріупол|мелітопол|бердичів|ізмаїл|чугуїв|куп'янськ|краматорськ|слов'янськ|покровськ|бахмут|авдіївк|павлоград|нікопол|генічеськ|каховк|донеччин|луганськ|луганщин)\p{L}*/u;
 function parseDelivery(clause, t, { ball, drone }) {
   const cargo = [];
   if (drone) cargo.push('shahed');
@@ -136,13 +160,18 @@ function parseDelivery(clause, t, { ball, drone }) {
   const model = mm ? 'Герань-' + mm[1].replace(/\s/g, '') : null;
   const jet = /реактивн|jet/u.test(t) || (!!mm && mm[1].split('/').every(n => /^[345]$/.test(n.trim())));
   const base = { kind: 'delivery', status: 'delivery', cargo, transport, missiles, count, unitWagons, unitTrains, model, jet };
-  const sites = siteIn(t);
+  // Доставка працює ТІЛЬКИ на пускові локації (SITES) та їхні регіони. Усе інше — відкидаємо.
+  const sites = siteIn(t).filter(s => !NO_DELIVERY.has(s.id));
   if (sites.length) return sites.map(site => ({ ...base, site, region: site.region }));
   const ro = regionObjIn(t);
-  if (ro) return [{ ...base, site: { id: null, name: ro.name, region: null }, region: ro.name, regionId: ro.id }];
-  const g = DELIV_PLACE.exec(clause);
-  const bad = /^(?:бпла|шахед|бр|баліст)/i;
-  if (g && !bad.test(g[1])) return [{ ...base, site: { id: null, name: g[1].trim(), region: null }, region: null }];
+  if (ro) {
+    if (!REGION_TO_SITES[ro.id]) return [];             // Воронеж, Бєлгород, Астрахань… — пускових майданчиків там нема
+    return [{ ...base, site: { id: null, name: ro.name, region: null }, region: ro.name, regionId: ro.id }];
+  }
+  // невідоме місце (Мукачеве, Харків, Харківщина…) — це не аеродром зі списку SITES: подію не створюємо
+  if (UA_PLACE.test(t) || DELIV_PLACE.test(clause)) return [];
+  const lead = LEAD_PLACE.exec(clause);
+  if (lead && !HEADER_WORD.test(norm(lead[1]))) return [];
   return [{ ...base, site: { id: null, name: 'місце не уточнено', region: null }, region: null }];
 }
 
@@ -182,9 +211,14 @@ export function parseNews(rawText) {
 
   // кліни: розділяємо за ⚠️, крапками/знаками з пробілом, переносами та «+»
   const clauses = text.split(/\u2063+|\n|\+|(?<!(?:^|\s)од\.)(?<=[.!?])\s+/u).map(s => s.trim()).filter(Boolean);
+  let lastEvs = [];                                             // події останнього речення з БпЛА/БР — їм дописуємо «цілі» з наступного речення
   for (const clause of clauses) {
     const t = norm(clause);
     if (NEG_RE.test(t)) continue;                               // «відбій», «пусків не зафіксовано»
+    if (lastEvs.length && !DRONE_RE.test(t) && !BALL_STRONG.test(t) && (THREAT_RE.test(t) || /атакув|ударит|курсом/u.test(t))) {
+      const tg = targetsIn(t);                                  // «Ймовірно спробують атакувати Миколаївщину/Одещину.»
+      if (tg.length) { lastEvs.forEach(e => { e.targets = [...new Set([...(e.targets || []), ...tg])]; }); continue; }
+    }
     const isThreat = THREAT_RE.test(t);
     const isLaunch = LAUNCH_RE.test(t);
     const drone = DRONE_RE.test(t);
@@ -205,6 +239,7 @@ export function parseNews(rawText) {
         else for (const ro of ros0) events.push({ kind: 'ballistic', status: 'launch', region: ro.name, regionId: ro.id, missiles: mis0 });
       }
     }
+    const made = events.length;
     if (ball && !drone) {                         // ── БАЛІСТИКА ──
       const missiles = MISSILES.filter(([, re]) => re.test(t)).map(([n]) => n);
       // регіон беремо після «з/із/с/из» — щоб «типу С-300» не плутати з місцем
@@ -215,6 +250,7 @@ export function parseNews(rawText) {
       const status = (isLaunch && !isThreat) ? 'launch' : 'threat';
       if (!ros.length) events.push({ kind: 'ballistic', status, region: null, regionId: null, missiles });
       else for (const ro of ros) events.push({ kind: 'ballistic', status, region: ro.name, regionId: ro.id, missiles });
+      lastEvs = events.slice(made);
       continue;
     }
     if (drone) {                                  // ── БпЛА ──
@@ -225,10 +261,8 @@ export function parseNews(rawText) {
         const st = norm(seg);
         const sites = siteIn(st);
         let site = sites[0] || null;
-        if (!site) {
-          const g = GENERIC_PLACE.exec(seg);
-          if (g && !/(?:бпла|шахед)/iu.test(g[1])) site = { id: null, name: g[1].trim(), region: null };
-        }
+        // Невідомі слова після «з/із/с» (Харківщини, Криму, Азовського, Мукачеве…) за майданчик НЕ вважаємо:
+        // це регіони й міста, а не пускові локації. Майданчик — лише зі списку SITES.
         if (!site) {            // «…з Міллерово, 8 реактивних» — сегмент без місця дописує кількість до попередньої події
           if (last && HAS_COUNT.test(st)) applyCounts(last, st);
           continue;
@@ -238,7 +272,9 @@ export function parseNews(rawText) {
           kind: 'drone', status: 'launch', site,
           groups: gm ? Number(gm[1]) : null,
           jet: /реактивн/u.test(st) || (droneAll && segs.length === 1),
-          droneType: /shahed|шахед|герань|geran/u.test(t) ? 'shahed' : 'unknown',
+          droneType: BANDEROL_RE.test(t) ? 'banderol' : /shahed|шахед|герань|geran/u.test(t) ? 'shahed' : 'unknown',
+          possible: isThreat,                       // «Можливі пуски …» — карта блимає як зазвичай, але в тексті підписано «можливі»
+          targets: targetsIn(t),
           note,
           normal: null, jetN: null, unit: 'drones',
         };
@@ -248,6 +284,7 @@ export function parseNews(rawText) {
         any = true;
       }
       void any;
+      lastEvs = events.slice(made);
     }
   }
   return events;
@@ -257,12 +294,16 @@ export function parseNews(rawText) {
 export function mergeEvents(list) {
   const m = new Map();
   for (const e of list) {
-    const key = e.kind === 'drone' ? `drone|${e.site.id || e.site.name}`
+    const key = e.kind === 'drone' ? `drone|${e.site.id || e.site.name}` + (e.droneType === 'banderol' ? '|banderol' : '')
       : e.kind === 'delivery' ? `deliv|${e.site.id || e.site.name}`
       : `bal|${e.status}|${e.region || 'any'}`;
     const o = m.get(key);
     if (!o) { m.set(key, { ...e, key }); continue; }
     if (e.groups != null) o.groups = Math.max(o.groups || 0, e.groups);
+    if (e.kind === 'drone') {
+      o.possible = !!(o.possible && e.possible);                // підтверджений пуск перекриває «можливий»
+      if (e.targets && e.targets.length) o.targets = [...new Set([...(o.targets || []), ...e.targets])];
+    }
     if (e.jet) o.jet = true;
     if (e.normal != null) o.normal = Math.max(o.normal || 0, e.normal);
     if (e.jetN != null) o.jetN = Math.max(o.jetN || 0, e.jetN);
@@ -306,10 +347,12 @@ export function formatEvents(events, footerHtml) {
   }
   const drones = events.filter(e => e.kind === 'drone');
   if (drones.length) {
-    const allShahed = drones.every(d => d.droneType === 'shahed');
+    const types = new Set(drones.map(d => d.droneType));
+    const typeHead = types.size === 1 && types.has('shahed') ? ' (Shahed)' : types.size === 1 && types.has('banderol') ? ' (Бандероль)' : '';
     const lines = drones.map(d => {
       const place = d.site.region ? `${d.site.name} (${d.site.region})` : d.site.name;
       const parts = [];
+      if (types.size > 1 && d.droneType === 'banderol') parts.push('Бандероль');
       if (d.groups != null) parts.push(`${d.groups} ${plural(d.groups)}`);
       else if (d.normal || d.jetN) {                                   // «…з Курська, 3 групи» / «10 звичайних, 8 реактивних»
         const u = n => d.unit === 'groups' ? ' ' + plural(n) : '';
@@ -317,10 +360,12 @@ export function formatEvents(events, footerHtml) {
         if (d.jetN) parts.push(`${d.jetN}${u(d.jetN)} реактивних`);
       }
       if (d.jet && !d.jetN) parts.push('реактивні');
+      if (d.possible) parts.push('можливі пуски');
       if (d.note) parts.push(d.note);
-      return '📍 ' + esc(place) + (parts.length ? ' — ' + esc(parts.join(', ')) : '');
+      return '📍 ' + esc(place) + (parts.length ? ' — ' + esc(parts.join(', ')) : '')
+        + (d.targets && d.targets.length ? ' → ' + esc(d.targets.join(' / ')) : '');
     });
-    blocks.push('🚀 Пуски БпЛА' + (allShahed ? ' (Shahed)' : '') + '\n' + lines.join('\n'));
+    blocks.push('🚀 Пуски БпЛА' + typeHead + '\n' + lines.join('\n'));
   }
   const dl = events.filter(e => e.kind === 'delivery');
   if (dl.length) {
@@ -366,9 +411,10 @@ export function pickNewEvents(raw, state, now, { maxAgeMin = 20 } = {}) {
     const mis = (e.missiles || []).length;
     const moreMis = mis > ((prev && prev.m) || 0);              // з'явився новий тип ракети — це нова інформація
     const moreCnt = e.kind === 'delivery' && (e.count || 0) > ((prev && prev.c) || 0);   // доставка: число зросло (40 → 70)
-    if (prev && now - prev.t <= ttl && !more && !moreMis && !moreCnt) continue;   // уже публікували нещодавно
+    const confirmed = !!(prev && prev.p && !e.possible);          // було «можливі пуски», тепер — пуск
+    if (prev && now - prev.t <= ttl && !more && !moreMis && !moreCnt && !confirmed) continue;   // уже публікували нещодавно
     out.push(e);
-    stamps.push([e.key, { t: now, g: e.groups || 0, m: mis, c: e.count || 0 }]);
+    stamps.push([e.key, { t: now, g: e.groups || 0, m: mis, c: e.count || 0, p: e.possible ? 1 : 0 }]);
   }
   return { events: out, stamps, stats, active: merged };
 }
@@ -398,15 +444,17 @@ export const SITE_COORDS = {
   kursk: [51.753603, 36.291073], nyavlya: [52.82544, 34.4996], orel: [53.3728, 35.80028],
   shatalovo: [54.334013, 32.47851], saky: [45.133333, 33.583333],
 };
+// Зони пусків без аеродрому (акваторії): на карті — тимчасова точка в морі, у доставці участі не беруть.
+export const ZONE_COORDS = { azov: [46.25, 36.55] };
 // events — це pick.active (злиті події). Повертає по одному завданню на аеродром, де відома кількість БпЛА.
 export function toLaunchShots(events) {
   const out = [];
   for (const e of events || []) {
-    if (e.kind !== 'drone' || !e.site || !SITE_COORDS[e.site.id]) continue;
+    if (e.kind !== 'drone' || !e.site || !(SITE_COORDS[e.site.id] || ZONE_COORDS[e.site.id])) continue;
     const normal = e.normal || 0, jetN = e.jetN || 0;
     if (!normal && !jetN) continue;
-    const [lat, lng] = SITE_COORDS[e.site.id];
-    out.push({ key: e.key, siteId: e.site.id, name: e.site.name, region: e.site.region || null, lat, lng, normal, jetN, unit: e.unit || 'drones', note: e.note || null });
+    const [lat, lng] = SITE_COORDS[e.site.id] || ZONE_COORDS[e.site.id];
+    out.push({ key: e.key, siteId: e.site.id, name: e.site.name, region: e.site.region || null, lat, lng, normal, jetN, unit: e.unit || 'drones', note: e.note || null, droneType: e.droneType || null, possible: !!e.possible });
   }
   return out;
 }
@@ -417,7 +465,7 @@ export function formatShotCaption(j, footerHtml) {
   if (j.normal) parts.push(`${j.normal} ${unit(j.normal)} звичайних`.replace('  ', ' '));
   if (j.jetN) parts.push(`${j.jetN} ${unit(j.jetN)} реактивних`.replace('  ', ' '));
   const place = j.region ? `${j.name} (${j.region})` : j.name;
-  return '🚀 Пуск БпЛА — ' + esc(place) + '\n' + esc(parts.join(' + ')) + (j.note ? '\n' + esc(j.note) : '') + (footerHtml ? '\n\n' + footerHtml : '');
+  return '🚀 ' + (j.droneType === 'banderol' ? 'Пуск Бандеролей' : 'Пуск БпЛА') + ' — ' + esc(place) + '\n' + esc(parts.join(' + ')) + (j.note ? '\n' + esc(j.note) : '') + (footerHtml ? '\n\n' + footerHtml : '');
 }
 
 
@@ -500,6 +548,96 @@ export function siteSummary(agg, siteId) {
   const sum = days => days.reduce((a, d) => { for (const k in d) a[k] = (a[k] || 0) + d[k]; return a; }, {});
   if (!s) return { today: {}, week: {}, transports: [], models: [], lastTs: 0, lastDelta: 0 };
   return { today: s.days[agg.today] || {}, week: sum(Object.values(s.days)), transports: s.transports, models: s.models, lastTs: s.lastTs, lastDelta: s.lastDelta };
+}
+
+// ══════════════════════════════════════════════════════════════
+// ── ПІДСУМОК О 00:00 (загальна інформація до теплової карти) ──
+// facts = midnightFacts(news, live, { now }):
+//   news — [{ date, text }] новини за добу (рахуємо останні `hours` годин);
+//   live — стан головної мапи зараз (window.__midnightState()): { drones, missiles, ballistic, strategic:{tu95:n,…}, ships:[{sea}] }
+// Правила:
+//   • на мапі є БпЛА → «БпЛА зафіксовані в повітряному просторі, можливі пуски протягом ночі», нема → «не зафіксовано»;
+//   • були повідомлення про виліт стратегічної авіації (Ту-95/160/22М3, МіГ-31К) → «були зафіксовані вильоти»;
+//   • балістика: пуски / загроза з новин за добу (+ балістика на мапі);
+//   • флот у Чорному/Азовському (Каспійському) морі → «флот активний».
+// ══════════════════════════════════════════════════════════════
+const STRAT_TYPES = [
+  ['Ту-95МС',  /ту-?\s?95/u], ['Ту-160', /ту-?\s?160/u], ['Ту-22М3', /ту-?\s?22/u], ['МіГ-31К', /м[іи]г-?\s?31/u],
+];
+const STRAT_RE   = /ту-?\s?95|ту-?\s?160|ту-?\s?22|м[іи]г-?\s?31|стратег\p{L}*\s+(?:авіац|авиац)|стратегическ\p{L}*\s+авиац/u;
+const STRAT_OUT  = /виліт|вилет|вилітає|вилітіл|вилетіл|злет|взл[её]т|злетіл|підняли|піднялис|подн[яи]лис|(?:в|у)\s+повітр[іяї]|(?:в|у)\s+воздух|бойов\p{L}*\s+(?:курс|чергув)|на\s+курс/u;
+const STRAT_END  = /відб[іи]й|посадк|повернул|повернув|приземл|сіл[иа]\s+на\s+аеродром/u;
+const FLEET_RE   = /флот|корабл|корабел|ракетоносі|ракетоносц|носі\p{L}*\s+калібр|калібр|підводн|подводн|(?:^|[^\p{L}])нк(?![\p{L}])/u;
+const FLEET_ON   = /вийш|вийд|вихід|вивед|вивели|акватор|(?:в|у)\s+мор[іе]|на\s+бойов|вахт/u;
+const FLEET_OFF  = /нем[аєе]є?(?![\p{L}])|відсутн|не\s+вияв|не\s+зафікс|повернул|зайшл|в\s+базі|у\s+базі|на\s+базі|0\s+носі|відб[іи]й/u;
+const SEAS = [['Чорного моря', /чорн\p{L}*\s+мор|черн\p{L}*\s+мор/u], ['Азовського моря', /азовськ|азовск/u], ['Каспійського моря', /каспі|каспи/u]];
+const CLAUSE_SPLIT = /\u2063+|\n|\+|(?<!(?:^|\s)од\.)(?<=[.!?])\s+/u;
+
+export function midnightFacts(news, live, { now = Date.now(), hours = 24 } = {}) {
+  live = live || {};
+  const strat = new Set(), seas = new Set(), evs = [];
+  let fleet = false;
+  for (const n of news || []) {
+    const ts = Date.parse(n.date);
+    if (!isFinite(ts) || now - ts > hours * 3600e3 || ts - now > 10 * 60000) continue;
+    const text = stripEmoji(n.text);
+    evs.push(...parseNews(n.text).filter(e => e.kind === 'ballistic'));
+    for (const clause of text.split(CLAUSE_SPLIT).map(x => x.trim()).filter(Boolean)) {
+      const t = norm(clause);
+      if (STRAT_RE.test(t) && STRAT_OUT.test(t) && !STRAT_END.test(t) && !NEG_RE.test(t)) {
+        const found = STRAT_TYPES.filter(([, re]) => re.test(t)).map(([nm]) => nm);
+        (found.length ? found : ['стратегічна авіація']).forEach(x => strat.add(x));
+      }
+      if (FLEET_RE.test(t) && !FLEET_OFF.test(t) && !NEG_RE.test(t)) {
+        const sea = SEAS.filter(([, re]) => re.test(t)).map(([nm]) => nm);
+        if (FLEET_ON.test(t) || (sea.length && /калібр|ракетоносі|ракетоносц/u.test(t))) { fleet = true; sea.forEach(x => seas.add(x)); }
+      }
+    }
+  }
+  const bal = mergeEvents(evs).filter(e => e.kind === 'ballistic');
+  const uniq = a => [...new Set(a.filter(Boolean))];
+  const liveStrat = Object.entries(live.strategic || {}).filter(([, v]) => v > 0);
+  const ships = live.ships || [];
+  ships.forEach(sh => { if (sh && sh.sea) seas.add(sh.sea); });
+  return {
+    air: { drones: live.drones || 0, missiles: live.missiles || 0, ballistic: live.ballistic || 0 },
+    strat: { departed: [...strat], live: liveStrat },
+    ballistic: {
+      launches: uniq(bal.filter(e => e.status === 'launch').map(e => e.region || 'місце не уточнено')),
+      threats: uniq(bal.filter(e => e.status === 'threat').map(e => e.region || 'місце не уточнено')),
+      missiles: uniq(bal.flatMap(e => e.missiles || [])),
+    },
+    fleet: { active: fleet || ships.length > 0, seas: [...seas], live: ships.length },
+  };
+}
+
+const STRAT_LIVE_NAME = { tu95: 'Ту-95МС', tu160: 'Ту-160', tu22m3: 'Ту-22М3', mig31: 'МіГ-31К' };
+export function formatMidnight(f, { now = Date.now(), footerHtml } = {}) {
+  const [y, m, d] = kyivDay(now).split('-');
+  const L = ['🌙 Станом на 00:00, ' + d + '.' + m + '.' + y, ''];
+  // повітряний простір
+  L.push(f.air.drones > 0
+    ? '🛵 БпЛА зафіксовані в повітряному просторі України (' + f.air.drones + '), можливі пуски протягом ночі.'
+    : '✅ У повітряному просторі України БпЛА не зафіксовано.');
+  if (f.air.missiles > 0) L.push('🚀 Ракети в повітряному просторі: ' + f.air.missiles + '.');
+  // стратегічна авіація
+  const sl = f.strat.live.map(([k, v]) => (STRAT_LIVE_NAME[k] || k) + (v > 1 ? ' ×' + v : ''));
+  if (f.strat.departed.length || sl.length) {
+    const names = [...new Set([...f.strat.departed.filter(x => x !== 'стратегічна авіація'), ...f.strat.live.map(([k]) => STRAT_LIVE_NAME[k] || k)])];
+    L.push('✈️ Були зафіксовані вильоти стратегічної авіації' + (names.length ? ' (' + esc(names.join(', ')) + ')' : '') + '.'
+      + (sl.length ? ' Зараз у повітрі: ' + esc(sl.join(', ')) + '.' : ''));
+  } else L.push('✈️ Вильотів стратегічної авіації не зафіксовано.');
+  // балістика
+  const b = f.ballistic, mis = b.missiles.length ? ' (' + esc(b.missiles.join(' / ')) + ')' : '';
+  if (b.launches.length) L.push('🚀🔴 Були пуски балістики з: ' + esc(b.launches.join(', ')) + mis + '.');
+  if (b.threats.length) L.push('🚨 Загроза застосування балістики: ' + esc(b.threats.join(', ')) + (b.launches.length ? '' : mis) + '.');
+  if (f.air.ballistic > 0) L.push('🚀 Балістика в повітряному просторі: ' + f.air.ballistic + '.');
+  if (!b.launches.length && !b.threats.length && !(f.air.ballistic > 0)) L.push('🟢 Загрози балістики не зафіксовано.');
+  // флот
+  L.push(f.fleet.active
+    ? '🚢 Флот активний — виведено в ' + (f.fleet.seas.length ? 'акваторію ' + esc(f.fleet.seas.join(' та ')) : 'море') + '.'
+    : '⚓ Вихід флоту в море не зафіксовано.');
+  return L.join('\n') + (footerHtml ? '\n\n' + footerHtml : '');
 }
 
 // ── ПРИКЛАДИ ПОВІДОМЛЕНЬ (без емодзі; з емодзі розбір працює так само — вони відкидаються) ──
