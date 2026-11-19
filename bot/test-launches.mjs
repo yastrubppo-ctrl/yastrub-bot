@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { parseNews, mergeEvents, formatEvents, toMapTriggers, toLaunchShots, aggregateDeliveries, siteSummary, makeSampleNews, pickNewEvents } from './launches-3.mjs';
+import { parseNews, mergeEvents, formatEvents, toMapTriggers, toLaunchShots, aggregateDeliveries, siteSummary, makeSampleNews, pickNewEvents } from './launches.mjs';
 const run = t => mergeEvents(parseNews(t));
 let n = 0; const ok = (name, fn) => { fn(); n++; console.log('✓', name); };
 
@@ -61,7 +61,7 @@ ok('демо-облік не змінився (Нявля 40, Донецьк 35)
 console.log('\nУсього перевірок:', n);
 
 // ── ПІДСУМОК О 00:00 ──
-import { midnightFacts, formatMidnight } from './launches-3.mjs';
+import { midnightFacts, formatMidnight } from './launches.mjs';
 const NOW = Date.parse('2026-11-17T22:00:00Z');   // 00:00 за Києвом
 const nw = (mins, text) => ({ date: new Date(NOW - mins * 60000).toISOString(), text });
 const fmt = f => formatMidnight(f, { now: NOW });
