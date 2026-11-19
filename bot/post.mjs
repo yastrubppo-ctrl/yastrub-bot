@@ -1,6 +1,7 @@
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import { pickNewEvents, formatEvents, toMapTriggers } from './launches.mjs';
+import { heatmapDue } from './heatmap.mjs';
 
 const { TG_BOT_TOKEN, TG_CHAT_ID, SITE_URL, VERCEL_BYPASS } = process.env;
 const SKIP_IF_EMPTY = process.env.SKIP_IF_EMPTY !== '0';
@@ -282,8 +283,8 @@ async function takeShot() {
   await page.waitForTimeout(1200);
   return page.screenshot({ type: 'jpeg', quality: 85 });
 }
-async function sendReport(text) {
-  const shot = await takeShot();
+async function sendReport(text, shotBuf) {
+  const shot = shotBuf || await takeShot();
   const form = new FormData();
   form.append('chat_id', TG_CHAT_ID);
   form.append('parse_mode', 'HTML');
@@ -329,6 +330,31 @@ async function summaryPass(key, cat, label) {
 }
 
 
+// ── О 00:00 за Києвом: загальний підсумок (БпЛА / стратегічна авіація / балістика / флот) + теплова карта ДОБИ на головній мапі ──
+// Текст і оверлей дає сайт (window.__midnightReport / __midnightPrepare з нового index.html); кадр, легенда й тривоги — ті самі, що в інших звітах.
+// Шлемо лише раз на добу (state.heat.lastDay) і лише протягом MIDNIGHT_GRACE_MIN хв після 00:00, щоб «станом на 00:00» не став «станом на 03:00».
+const MIDNIGHT = process.env.MIDNIGHT !== '0';                              // MIDNIGHT=0 вимикає нічний підсумок
+const MIDNIGHT_GRACE_MIN = Number(process.env.MIDNIGHT_GRACE_MIN ?? 45);
+async function midnightPass() {
+  const d = heatmapDue(state, Date.now(), { graceMin: MIDNIGHT_GRACE_MIN });   // { day:'YYYY-MM-DD' } — попередня доба, або null
+  if (!d) return;
+  const rep = await page.evaluate(() => (window.__midnightReport ? window.__midnightReport() : null));
+  if (!rep) { console.log('::warning::Нічний підсумок: на сайті немає __midnightReport — оновіть index.html'); return; }
+  await prepareShot();
+  const prep = await safe('__midnightPrepare', () => page.evaluate(day => window.__midnightPrepare(day, { keepView: true }), d.day), null);
+  console.log(`Нічний підсумок за ${d.day}: маршрутів ${prep ? prep.rows : '— (теплова карта не вдалась)'}, тайли ${prep ? prep.tiles : '—'}`);
+  await safe('тригери', () => page.evaluate(t => (window.__launchTrigger ? window.__launchTrigger(t) : -1), mapTriggers), -1);
+  await page.waitForTimeout(1200);
+  let ok = false;
+  try {
+    const shot = await page.screenshot({ type: 'jpeg', quality: 85 });
+    ok = await sendReport(rep.html, shot);
+  } finally {
+    await safe('__midnightClear', () => page.evaluate(() => window.__midnightClear && window.__midnightClear()));
+  }
+  if (ok) { state.heat = { ...(state.heat || {}), lastDay: d.day, sentAt: Date.now(), rows: prep ? prep.rows : 0 }; saveState(); }
+}
+
 // ══ ГОЛОВНИЙ ЦИКЛ ══
 // Перша передача новин — одразу (без очікування карти). Далі кожні POLL_SEC секунд: новини (балістика/пуски/доставка), ракети, загальна ситуація, КАБ.
 // RUN_SEC=0 — один прохід (після очікування карти) і вихід; RUN_SEC>0 — безперервна робота, у GitHub Actions ставимо ~20000 (5 год 40 хв).
@@ -348,6 +374,7 @@ for (;;) {
       await safe('ракети', () => summaryPass('missile', 'missile', 'Ракети'));
       await safe('ситуація', () => summaryPass('situation', 'drone', 'Ситуація БпЛА'));
       await safe('КАБ', kabPass);
+      if (MIDNIGHT) await safe('нічний підсумок', midnightPass);
     }
     fails = 0;
   } catch (e) {
