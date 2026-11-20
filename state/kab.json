@@ -156,9 +156,9 @@
  "sched": {
   "ballistic": 1795136470494,
   "missile": 1795138300833,
-  "situation": 1795137966243,
+  "situation": 1795138566647,
   "launch": 1795128049051,
-  "ballisticLive": 1795137375284
+  "ballisticLive": 1795138557552
  },
  "heat": {
   "lastDay": "2026-11-19",
