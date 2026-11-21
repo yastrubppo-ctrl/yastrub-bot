@@ -14,7 +14,7 @@ const WAIT_MS = Number(process.env.WAIT_MS || 25000);
 const HOOKS_TIMEOUT_MS = Number(process.env.HOOKS_TIMEOUT_MS || 60000);   // скільки чекати, поки сайт віддасть функції бота
 const BALLISTIC_THREAT_BLINK = process.env.BALLISTIC_THREAT_BLINK !== '0'; // червоні квадрати і для «загрози балістики», не лише для пусків
 const ALERTS_LAYER = process.env.ALERTS_LAYER !== '0';                       // ALERTS_LAYER=0 — не вмикати шар тривог на скріні
-const ALERT_OPACITY = Math.min(100, Math.max(20, Number(process.env.ALERT_OPACITY || 70)));   // «Відображення → Насиченість тривог», % (повзунок на сайті: 20–100)
+const ALERT_OPACITY = Math.min(100, Math.max(10, Number(process.env.ALERT_OPACITY || 40)));   // «Відображення → Насиченість тривог», % (повзунок на сайті: 20–100)
 const FRAME_BOUNDS = [[44.3, 22.1], [52.45, 40.3]];                        // межі України (з Кримом)
 const FRAME_PADDING = Number(process.env.FRAME_PADDING || 18);              // відступ від країв кадру, px
 // ── Періодичність повідомлень (хвилини). Один бот, різні типи: ──
@@ -60,7 +60,8 @@ state.news = state.news || {};
 state.news.sent = state.news.sent || {};
 state.strat = state.strat || {};
 state.strat.sent = state.strat.sent || {};     // які події стратегів уже пішли в канал (ключ → час)
-state.strat.msgs = state.strat.msgs || [];     // розпізнані новини про стратегів: сайт відновлює з них сценарій (позиції бортів) після перезапуску
+state.strat.msgs = state.strat.v === 2 ? (state.strat.msgs || []) : [];   // v2: старі (хибні) новини з попередньої версії скидаємо
+state.strat.v = 2;     // розпізнані новини про стратегів: сайт відновлює з них сценарій (позиції бортів) після перезапуску
 state.sched = state.sched || {};   // коли востаннє слали кожен тип: ballistic / launch / missile / situation
 function saveState() {
   const now = Date.now();
@@ -101,8 +102,8 @@ await page.addInitScript(() => { try { localStorage.setItem('deepstateOccupiedVi
 // стратегічна авіація: повертаємо сайту новини про стратегів з минулих запусків — він сам перемотає сценарій до «зараз»
 await page.addInitScript(msgs => {
   try {
-    const old = JSON.parse(localStorage.getItem('yastrub_strat_live') || '[]'), seen = new Set(old.map(m => m.id));
-    localStorage.setItem('yastrub_strat_live', JSON.stringify(old.concat((msgs || []).filter(m => !seen.has(m.id))).sort((a, b) => a.ts - b.ts).slice(-150)));
+    const old = JSON.parse(localStorage.getItem('yastrub_strat_live2') || '[]'), seen = new Set(old.map(m => m.id));
+    localStorage.setItem('yastrub_strat_live2', JSON.stringify(old.concat((msgs || []).filter(m => !seen.has(m.id))).sort((a, b) => a.ts - b.ts).slice(-150)));
   } catch (e) {}
 }, state.strat.msgs);
 
@@ -391,17 +392,34 @@ async function stratPass() {
   // новини про стратегів — у state (наступний запуск бота відновить сценарій)
   if (JSON.stringify(st.msgs) !== JSON.stringify(state.strat.msgs)) { state.strat.msgs = st.msgs; saveState(); }
   const now = Date.now();
-  const fresh = (st.events || []).filter(e => !state.strat.sent[e.key] && now - e.ts < 3 * 3600000);
+  // ── передислокації, тренування, підсумок за добу, ймовірність обстрілу — лише текстом, без скрінів ──
+  const AIR = { summary: 1, reloc: 1, train: 1, prob: 1 };
+  for (const e of (st.events || []).filter(e => AIR[e.k] && !state.strat.sent[e.key])) {
+    state.strat.sent[e.key] = now;
+    if (now - e.ts > 6 * 3600000) continue;                 // старе (після перезапуску) — не дублюємо
+    if (e.k === 'prob' && e.summary) continue;              // ймовірність уже є в підсумку за добу
+    const txt = await page.evaluate(([k, key]) => StratSim.airReport(k, key), [e.k, e.key]);
+    if (!txt) continue;
+    console.log(`Стратегічна авіація (без скрінів): ${e.k}`);
+    const r = await sendText(txt + (footerHtml ? '\n\n' + footerHtml : ''));
+    if (!r.ok) { console.log(`::warning::Telegram sendMessage: ${r.description}`); delete state.strat.sent[e.key]; }
+    saveState();
+  }
+  const fresh = (st.events || []).filter(e => !AIR[e.k] && !state.strat.sent[e.key] && now - e.ts < 3 * 3600000);
+  // «живі» групи — ті, про які є новини (розрахункове «повертаються» не рахується)
+  const live = st.groups.filter(g => !g.auto && g.state !== 'gone');
+  const launched = st.groups.some(g => g.launched);
   let kind = null;
-  fresh.forEach(e => { if (STRAT_URGENT[e.k] && (!kind || STRAT_URGENT[e.k] > STRAT_URGENT[kind])) kind = e.k; });
-  if (kind === 'etaBorder') kind = 'launch';
+  fresh.forEach(e => {
+    let k = e.k;
+    if (k === 'etaBorder') k = launched ? 'launch' : null;      // «підліт КР до кордону» без пуску зі стратегів — не наша тема (напр. Калібри)
+    if (k && STRAT_URGENT[k] && (!kind || STRAT_URGENT[k] > STRAT_URGENT[kind])) kind = k;
+  });
   if (!kind) {
-    if (!st.active || !due('strat')) {           // не термінове: тихо позначаємо, піде в наступному оновленні
-      return;
-    }
+    if (!live.length || !due('strat')) return;    // не термінове: піде в наступному оновленні
     kind = 'update';
   }
-  if (!st.active && kind !== 'rtb') { fresh.forEach(e => { state.strat.sent[e.key] = now; }); saveState(); return; }
+  if (!live.length && kind !== 'rtb') { fresh.forEach(e => { state.strat.sent[e.key] = now; }); saveState(); return; }
   const html = await page.evaluate(k => StratSim.reportHtml(k), kind);
   console.log(`Стратегічна авіація: ${kind}, груп ${st.groups.length}, нових подій ${fresh.length}`);
   const shot1 = await takeShot();                                     // 1) загальна інформація — Україна
