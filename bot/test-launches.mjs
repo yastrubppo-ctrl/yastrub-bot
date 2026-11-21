@@ -89,3 +89,39 @@ ok('00:00: флот у Чорному морі → активний; «носі�
   assert.match(fmt(midnightFacts([], { ships: [{ sea: 'Азовського моря' }] }, { now: NOW })), /акваторію Азовського моря/);
 });
 console.log('Усього перевірок:', n);
+
+// ── ТОЧНІСТЬ: області-«щини», неявні пуски, «швидкісна ціль», заперечення, напрямок, підліт ──
+const one1 = t => mergeEvents(parseNews(t));
+const ids = t => one1(t).map(e => e.kind + ':' + (e.site ? e.site.id : e.regionId) + ':' + (e.status || ''));
+ok('Курщина / Орловщина / Брянщина → майданчики', () => {
+  assert.deepEqual(ids('Пуски шахедів з Курщини'), ['drone:kursk:launch']);
+  assert.deepEqual(ids('Пуски ударних БпЛА з Орловщини'), ['drone:orel:launch']);
+  assert.deepEqual(ids('Пуски шахедів з Брянщини'), ['drone:bryansk:launch']);
+});
+ok('неявний пуск БпЛА без слова «пуск»', () => {
+  const e = one1('Шахеди з Міллерово у напрямку Харківщини');
+  assert.equal(e.length, 1); assert.equal(e[0].site.id, 'millerovo'); assert.deepEqual(e[0].targets, ['Харківщина']);
+  assert.deepEqual(ids('Групи БпЛА з Курська та Брянська курсом на Сумщину'), ['drone:kursk:launch', 'drone:bryansk:launch']);
+});
+ok('неявний пуск балістики: «Балістика з Курщини!», «Швидкісна ціль з Брянщини»', () => {
+  assert.deepEqual(ids('Балістика з Курщини!'), ['ballistic:kursk:launch']);
+  assert.deepEqual(ids('Швидкісна ціль з Брянщини на Чернігівщину'), ['ballistic:bryansk:launch']);
+});
+ok('без «з <локація>» неявного пуску нема', () => {
+  assert.equal(one1('Шахеди над Сумщиною').length, 0);
+  assert.equal(one1('Збито 20 шахедів з 25').length, 0);
+  assert.equal(one1('Дрони з Харківщини летять на Полтаву').length, 0);
+});
+ok('заперечення: «пусків … немає»', () => {
+  assert.equal(one1('Пусків шахедів з Курська поки немає').length, 0);
+  assert.equal(one1('Нових пусків балістики з Брянська не було').length, 0);
+  assert.equal(one1('Без нових пусків з Міллерово').length, 0);
+});
+ok('підліт через ~40 хв', () => assert.equal(one1('Пуски БпЛА з Чауди, підліт через ~40 хв')[0].note, 'підліт ~40 хв'));
+console.log('Усього перевірок:', n);
+
+// ── пуски без слова «шахед», «3х з брянська» ──
+ok('«Пуски з Брянська, 2 групи» → БпЛА, 2 групи', () => { const e = one1('Пуски з Брянська, 2 групи'); assert.equal(e.length, 1); assert.equal(e[0].site.id, 'bryansk'); assert.equal(e[0].normal, 2); assert.equal(e[0].unit, 'groups'); });
+ok('«3х з брянська реактивні» → 3 реактивні', () => { const e = one1('3х з брянська реактивні'); assert.equal(e.length, 1); assert.equal(e[0].jetN, 3); });
+ok('«Пуски КР з Брянська» — не БпЛА; РСЗВ — не реактивні БпЛА', () => { assert.equal(one1('Пуски КР з Брянська').filter(e => e.kind === 'drone').length, 0); assert.equal(one1('Реактивна система залпового вогню з Курська').length, 0); });
+console.log('Усього перевірок:', n);

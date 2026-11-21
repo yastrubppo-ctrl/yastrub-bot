@@ -39,6 +39,15 @@ const safe = async (label, fn, dflt) => {
   try { return await fn(); } catch (e) { console.log(`::warning::${label}: ${String(e && e.message).split('\n')[0].slice(0, 400)}`); return dflt; }
 };
 const siteOrigin = new URL(SITE_URL).origin;
+// чекаємо, поки карта домалює тайли (MapLibre: подія idle); на старому сайті без MapLibre — просто пауза
+const waitMapIdle = (maxMs = 8000) => page.evaluate(ms => new Promise(res => {
+  const ml = window.map && window.map._ml, t0 = Date.now();
+  if (!ml) return setTimeout(() => res('pause'), Math.min(ms, 4000));
+  const done = why => { clearTimeout(to); res(why); };
+  const to = setTimeout(() => done('timeout'), ms);
+  const chk = () => { if (ml.loaded() && ml.areTilesLoaded()) { setTimeout(() => done('idle ' + (Date.now() - t0) + ' мс'), 300); } else ml.once('idle', chk); };
+  ml.triggerRepaint(); chk();
+}), maxMs).catch(() => 'n/a');
 
 // ── пам'ять між запусками (state/kab.json комітиться з workflow, лише якщо змінилась) ──
 const STATE_FILE = new URL('../state/kab.json', import.meta.url);
@@ -204,7 +213,8 @@ if (ALERTS_LAYER) {
     await updateAlerts();                                    // гарантовано дочекатись завантаження і малювання тривог
     let painted = -1;
     try { painted = Object.values(_oblast).filter(_isAlertColored).length; } catch (e) {}
-    return { ok: !!window.alertsEnabled, opacity: alertSettings.alertOpacity, paintedOblasts: painted };
+    let paintedH = 0; try { paintedH = Object.values(_hromada).filter(_isAlertColored).length; } catch (e) {}   // тривоги по громадах/районах
+    return { ok: !!window.alertsEnabled, opacity: alertSettings.alertOpacity, paintedOblasts: painted, paintedHromadas: paintedH };
   }, ALERT_OPACITY), null);
   console.log('Шар тривог:', al ? JSON.stringify(al) : '⚠️ НЕ вдалося ввімкнути', `(насиченість ${ALERT_OPACITY}%)`);
 }
@@ -221,9 +231,12 @@ await safe('кадр карти', () => page.evaluate(([bounds, pad]) => {
     m.options.zoomSnap = 0; m.options.zoomDelta = 0.25;
     m.invalidateSize();
     m.fitBounds(bounds, { animate: false, padding: [pad, pad], maxZoom: 9 });
+    // нова карта (MapLibre 3D): кадр завжди рівно зверху, на північ, без сцен/слідування камери
+    try { if (window.LMFollow) LMFollow.stop(); if (window.LMScene) LMScene.stop(); } catch (e) {}
+    if (m._ml) { m._ml.setPadding({ top: 0, bottom: 0, left: 0, right: 0 }); m._ml.jumpTo({ pitch: 0, bearing: 0 }); m.fitBounds(bounds, { animate: false, padding: [pad, pad], maxZoom: 9 }); }
   }
 }, [FRAME_BOUNDS, FRAME_PADDING]));
-await page.waitForTimeout(4000);
+await waitMapIdle(9000);
 // ── ЛЕГЕНДА КАРТИ ──
 // Будується прямо тут, у боті (не залежить від того, чи оновлено index.html на сайті): іконки — ВЛАСНІ svg з img/ сайту.
 // Стоїть у вільному куті кадру (низ-ліво), масштабується під розмір вікна.
@@ -280,7 +293,8 @@ console.log('Легенда:', legendInfo ? JSON.stringify(legendInfo) : '⚠️
 async function takeShot() {
   await prepareShot();
   await safe('__launchTrigger', () => page.evaluate(t => (window.__launchTrigger ? window.__launchTrigger(t) : -1), mapTriggers), -1);
-  await page.waitForTimeout(1200);
+  await page.waitForTimeout(600);
+  await waitMapIdle(5000);                       // тайли й шари домальовані — скрін без «дірок»
   return page.screenshot({ type: 'jpeg', quality: 85 });
 }
 async function sendReport(text, shotBuf) {
@@ -344,7 +358,8 @@ async function midnightPass() {
   const prep = await safe('__midnightPrepare', () => page.evaluate(day => window.__midnightPrepare(day, { keepView: true }), d.day), null);
   console.log(`Нічний підсумок за ${d.day}: маршрутів ${prep ? prep.rows : '— (теплова карта не вдалась)'}, тайли ${prep ? prep.tiles : '—'}`);
   await safe('тригери', () => page.evaluate(t => (window.__launchTrigger ? window.__launchTrigger(t) : -1), mapTriggers), -1);
-  await page.waitForTimeout(1200);
+  await page.waitForTimeout(600);
+  await waitMapIdle(6000);
   let ok = false;
   try {
     const shot = await page.screenshot({ type: 'jpeg', quality: 85 });
