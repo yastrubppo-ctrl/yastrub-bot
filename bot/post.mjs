@@ -21,6 +21,8 @@ const FRAME_PADDING = Number(process.env.FRAME_PADDING || 18);              // �
 const BALLISTIC_MIN = Number(process.env.BALLISTIC_MIN ?? 0.25);    // балістика: перше повідомлення — МИТТЄВО; наступні нові цілі збираються не довше ніж стільки хвилин (0.25 = 15 с, щоб залп не дав 10 повідомлень)
 const LAUNCH_MIN    = Number(process.env.LAUNCH_MIN ?? 5);          // пуски БпЛА (+ доставка)
 const MISSILE_MIN   = Number(process.env.MISSILE_MIN ?? 5);         // крилаті та інші ракети в повітрі (Х-101, Калібр, Іскандер-К…; балістика — окремо й миттєво; Герань-5 і Бандероль — це БпЛА)
+const STRAT_MIN     = Number(process.env.STRAT_MIN ?? 30);         // стратегічна авіація: оновлення «де летять» раз на N хв (виліт, маневр, пуск — одразу)
+const STRAT_ALERTS  = process.env.STRAT_ALERTS !== '0';            // STRAT_ALERTS=0 вимикає повідомлення про стратегічну авіацію
 const SITUATION_MIN = Number(process.env.SITUATION_MIN ?? 10);      // загальна ситуація по БпЛА (шахеди, реактивні, Герань-5, Бандероль…)
 const RUN_SEC       = Number(process.env.RUN_SEC ?? process.env.NEWS_WATCH_SEC ?? 0);   // скільки секунд працювати безперервно (0 = один прохід і вихід)
 const POLL_SEC      = Number(process.env.POLL_SEC || 3);            // як часто перевіряти новини і цілі на карті (секунди)
@@ -56,11 +58,16 @@ try { state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
 state.kab = state.kab || {};
 state.news = state.news || {};
 state.news.sent = state.news.sent || {};
+state.strat = state.strat || {};
+state.strat.sent = state.strat.sent || {};     // які події стратегів уже пішли в канал (ключ → час)
+state.strat.msgs = state.strat.msgs || [];     // розпізнані новини про стратегів: сайт відновлює з них сценарій (позиції бортів) після перезапуску
 state.sched = state.sched || {};   // коли востаннє слали кожен тип: ballistic / launch / missile / situation
 function saveState() {
   const now = Date.now();
   for (const k of Object.keys(state.kab)) if (now - state.kab[k] > 24 * 3600000) delete state.kab[k];
   for (const k of Object.keys(state.news.sent)) if (now - state.news.sent[k].t > 24 * 3600000) delete state.news.sent[k];
+  if (state.strat) { for (const k of Object.keys(state.strat.sent)) if (now - state.strat.sent[k] > 24 * 3600000) delete state.strat.sent[k];
+    state.strat.msgs = (state.strat.msgs || []).filter(m => m && now - m.ts < 14 * 3600000).slice(-150); }
   fs.mkdirSync(new URL('../state/', import.meta.url), { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 1));
 }
@@ -91,6 +98,13 @@ if (VERCEL_BYPASS) {                       // ключ Vercel — ТІЛЬКИ �
 }
 
 await page.addInitScript(() => { try { localStorage.setItem('deepstateOccupiedVisible', '1'); } catch (e) {} });
+// стратегічна авіація: повертаємо сайту новини про стратегів з минулих запусків — він сам перемотає сценарій до «зараз»
+await page.addInitScript(msgs => {
+  try {
+    const old = JSON.parse(localStorage.getItem('yastrub_strat_live') || '[]'), seen = new Set(old.map(m => m.id));
+    localStorage.setItem('yastrub_strat_live', JSON.stringify(old.concat((msgs || []).filter(m => !seen.has(m.id))).sort((a, b) => a.ts - b.ts).slice(-150)));
+  } catch (e) {}
+}, state.strat.msgs);
 
 const resp = await page.goto(SITE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
 console.log('HTTP статус сайту:', resp && resp.status(), '| Заголовок:', await page.title());
@@ -112,7 +126,7 @@ const NEWS_WATCH_SEC = Number(process.env.NEWS_WATCH_SEC || 0);          // >0: 
 const footerHtml = await safe('__tgFooterHtml', () => page.evaluate(() => (typeof window.__tgFooterHtml === 'function' ? window.__tgFooterHtml() : '')), '');
 
 // ── розклад: чи пора слати цей тип ──
-const INTERVAL = { ballistic: BALLISTIC_MIN * 60000, ballisticLive: BALLISTIC_MIN * 60000, launch: LAUNCH_MIN * 60000, missile: MISSILE_MIN * 60000, situation: SITUATION_MIN * 60000 };
+const INTERVAL = { ballistic: BALLISTIC_MIN * 60000, ballisticLive: BALLISTIC_MIN * 60000, launch: LAUNCH_MIN * 60000, missile: MISSILE_MIN * 60000, situation: SITUATION_MIN * 60000, strat: STRAT_MIN * 60000 };
 // Допуск на «розклад від cron»: у режимі одного проходу (RUN_SEC=0) запуски йдуть раз на N хв, і час перевірки гуляє на ±десятки секунд
 // (черга GitHub, довжина запуску). Якщо вимагати рівно INTERVAL, то перевірка «через 9:55 замість 10:00» пропускається і повідомлення
 // виходить лише раз на 2 запуски — тобто раз на 20 хв замість 10. Тому вважаємо «пора», коли минуло INTERVAL мінус допуск (не більше 30% інтервалу).
@@ -224,7 +238,11 @@ const nBlink = await safe('__launchTrigger', () => page.evaluate(t => (window.__
 console.log(`Тригери пусків на карті: ${nBlink} з ${mapTriggers.length}` + (nBlink === -1 ? ' (на сайті немає __launchTrigger — старий index.html?)' : ''));
 
 // кадр: Україна по кордонах із відступом. zoomSnap=0 — інакше Leaflet округлює зум вниз до цілого і країна виглядає дрібною
-await safe('кадр карти', () => page.evaluate(([bounds, pad]) => {
+await safe('кадр карти', frameUkraine);
+await prepareShot2();
+}
+// кадр «Україна»: рівно зверху, на північ, по кордонах (після кадру стратегів повертаємось до нього)
+function frameUkraine() { return page.evaluate(([bounds, pad]) => {
   const m = window.map;
   document.documentElement.classList.add('tg-shot');          // заморожує блимання у «увімкненому» стані
   if (m) {
@@ -235,7 +253,8 @@ await safe('кадр карти', () => page.evaluate(([bounds, pad]) => {
     try { if (window.LMFollow) LMFollow.stop(); if (window.LMScene) LMScene.stop(); } catch (e) {}
     if (m._ml) { m._ml.setPadding({ top: 0, bottom: 0, left: 0, right: 0 }); m._ml.jumpTo({ pitch: 0, bearing: 0 }); m.fitBounds(bounds, { animate: false, padding: [pad, pad], maxZoom: 9 }); }
   }
-}, [FRAME_BOUNDS, FRAME_PADDING]));
+}, [FRAME_BOUNDS, FRAME_PADDING]); }
+async function prepareShot2() {
 await waitMapIdle(9000);
 // ── ЛЕГЕНДА КАРТИ ──
 // Будується прямо тут, у боті (не залежить від того, чи оновлено index.html на сайті): іконки — ВЛАСНІ svg з img/ сайту.
@@ -344,6 +363,61 @@ async function summaryPass(key, cat, label) {
 }
 
 
+// ── СТРАТЕГІЧНА АВІАЦІЯ (Ту-95 / Ту-160 / Ту-22М3 / МіГ-31К з новин) ──
+// Сайт (StratSim) веде сценарій: де летять борти, рубіж, маневр, пуски. Бот шле ДВА скріни альбомом:
+//   1) загальна карта України (як в інших звітах);  2) кадр польоту стратегів (борти, рубіж пуску, траєкторії ракет).
+// Виліт, пусковий маневр, пуск, підліт ракет до кордону, повернення — ОДРАЗУ (незалежно від паузи); у польоті — оновлення раз на STRAT_MIN хв.
+const STRAT_URGENT = { launch: 5, maneuver: 4, takeoff: 3, etaBorder: 2, rtb: 1 };
+async function sendAlbum(text, shots) {
+  const fd = new FormData();
+  fd.append('chat_id', TG_CHAT_ID);
+  const cap = text.length <= 1000;
+  fd.append('media', JSON.stringify(shots.map((_, i) => ({ type: 'photo', media: 'attach://p' + i, ...(i === 0 && cap ? { caption: text, parse_mode: 'HTML' } : {}) }))));
+  shots.forEach((b, i) => fd.append('p' + i, new Blob([b], { type: 'image/jpeg' }), 'p' + i + '.jpg'));
+  const r = await api('sendMediaGroup', fd);
+  console.log('sendMediaGroup', JSON.stringify(r).slice(0, 200));
+  if (!r.ok) { console.log(`::warning::Telegram sendMediaGroup: ${r.description}`); return sendReport(text, shots[0]); }   // запасний шлях — одне фото
+  if (!cap) { const r2 = await sendText(text); if (!r2.ok) console.log(`::warning::Telegram sendMessage: ${r2.description}`); }
+  return true;
+}
+async function stratPass() {
+  if (!STRAT_ALERTS) return;
+  const st = await page.evaluate(() => {
+    if (!window.StratSim || !StratSim.status) return null;
+    try { StratSim.ingest(); } catch (e) {}
+    return StratSim.status();
+  });
+  if (!st) return;
+  // новини про стратегів — у state (наступний запуск бота відновить сценарій)
+  if (JSON.stringify(st.msgs) !== JSON.stringify(state.strat.msgs)) { state.strat.msgs = st.msgs; saveState(); }
+  const now = Date.now();
+  const fresh = (st.events || []).filter(e => !state.strat.sent[e.key] && now - e.ts < 3 * 3600000);
+  let kind = null;
+  fresh.forEach(e => { if (STRAT_URGENT[e.k] && (!kind || STRAT_URGENT[e.k] > STRAT_URGENT[kind])) kind = e.k; });
+  if (kind === 'etaBorder') kind = 'launch';
+  if (!kind) {
+    if (!st.active || !due('strat')) {           // не термінове: тихо позначаємо, піде в наступному оновленні
+      return;
+    }
+    kind = 'update';
+  }
+  if (!st.active && kind !== 'rtb') { fresh.forEach(e => { state.strat.sent[e.key] = now; }); saveState(); return; }
+  const html = await page.evaluate(k => StratSim.reportHtml(k), kind);
+  console.log(`Стратегічна авіація: ${kind}, груп ${st.groups.length}, нових подій ${fresh.length}`);
+  const shot1 = await takeShot();                                     // 1) загальна інформація — Україна
+  let shot2 = null;
+  try {
+    const ok = await page.evaluate(k => StratSim.frameView(k), kind);  // 2) політ стратегів
+    if (ok) { await page.waitForTimeout(500); await waitMapIdle(7000); shot2 = await page.screenshot({ type: 'jpeg', quality: 85 }); }
+  } finally {
+    await safe('кадр карти', frameUkraine);
+    await waitMapIdle(5000);
+  }
+  const text = html + (footerHtml ? '\n\n' + footerHtml : '');
+  const ok = shot2 ? await sendAlbum(text, [shot1, shot2]) : await sendReport(text, shot1);
+  if (ok) { fresh.forEach(e => { state.strat.sent[e.key] = now; }); mark('strat'); }
+}
+
 // ── О 00:00 за Києвом: загальний підсумок (БпЛА / стратегічна авіація / балістика / флот) + теплова карта ДОБИ на головній мапі ──
 // Текст і оверлей дає сайт (window.__midnightReport / __midnightPrepare з нового index.html); кадр, легенда й тривоги — ті самі, що в інших звітах.
 // Шлемо лише раз на добу (state.heat.lastDay) і лише протягом MIDNIGHT_GRACE_MIN хв після 00:00, щоб «станом на 00:00» не став «станом на 03:00».
@@ -389,6 +463,7 @@ for (;;) {
       await safe('ракети', () => summaryPass('missile', 'missile', 'Ракети'));
       await safe('ситуація', () => summaryPass('situation', 'drone', 'Ситуація БпЛА'));
       await safe('КАБ', kabPass);
+      await safe('стратегічна авіація', stratPass);
       if (MIDNIGHT) await safe('нічний підсумок', midnightPass);
     }
     fails = 0;
