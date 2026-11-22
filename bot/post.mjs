@@ -13,7 +13,7 @@ const NEWS_MAX_AGE_MIN = Number(process.env.NEWS_MAX_AGE_MIN || 20);     // бе
 const WAIT_MS = Number(process.env.WAIT_MS || 25000);
 const HOOKS_TIMEOUT_MS = Number(process.env.HOOKS_TIMEOUT_MS || 60000);   // скільки чекати, поки сайт віддасть функції бота
 const BALLISTIC_THREAT_BLINK = process.env.BALLISTIC_THREAT_BLINK !== '0'; // червоні квадрати і для «загрози балістики», не лише для пусків
-const ALERTS_LAYER = process.env.ALERTS_LAYER !== '0';                       // ALERTS_LAYER=0 — не вмикати шар тривог на скріні
+const ALERTS_LAYER = process.env.ALERTS_LAYER === '1';                       // за замовчуванням тривог на скрінах НЕМАЄ (заважають бачити цілі); ALERTS_LAYER=1 — увімкнути
 const ALERT_OPACITY = Math.min(100, Math.max(10, Number(process.env.ALERT_OPACITY || 40)));   // «Відображення → Насиченість тривог», % (повзунок на сайті: 20–100)
 const FRAME_BOUNDS = [[44.3, 22.1], [52.45, 40.3]];                        // межі України (з Кримом)
 const FRAME_PADDING = Number(process.env.FRAME_PADDING || 18);              // відступ від країв кадру, px
@@ -99,6 +99,8 @@ if (VERCEL_BYPASS) {                       // ключ Vercel — ТІЛЬКИ �
 }
 
 await page.addInitScript(() => { try { localStorage.setItem('deepstateOccupiedVisible', '1'); } catch (e) {} });
+// синхронізація: бот працює цілодобово і відправляє журнали (пуски, стратеги, вибухи) на сервер — їх бачать усі пристрої
+if (process.env.SYNC_KEY) await page.addInitScript(k => { try { localStorage.setItem('yastrub_sync_key', k); } catch (e) {} }, process.env.SYNC_KEY);
 // стратегічна авіація: повертаємо сайту новини про стратегів з минулих запусків — він сам перемотає сценарій до «зараз»
 await page.addInitScript(msgs => {
   try {
@@ -232,6 +234,16 @@ if (ALERTS_LAYER) {
     return { ok: !!window.alertsEnabled, opacity: alertSettings.alertOpacity, paintedOblasts: painted, paintedHromadas: paintedH };
   }, ALERT_OPACITY), null);
   console.log('Шар тривог:', al ? JSON.stringify(al) : '⚠️ НЕ вдалося ввімкнути', `(насиченість ${ALERT_OPACITY}%)`);
+}
+else {
+  // сайт сам вмикає шар тривог через ~1.5 с після завантаження — на скрінах бота вимикаємо його, щоб жовті/червоні області не перекривали цілі
+  const off = await safe('вимкнути тривоги', () => page.evaluate(async () => {
+    for (let i = 0; i < 12 && !window.alertsEnabled; i++) await new Promise(r => setTimeout(r, 250));
+    if (window.alertsEnabled && typeof toggleAlertsLayer === 'function') toggleAlertsLayer();
+    await new Promise(r => setTimeout(r, 300));
+    return !window.alertsEnabled;
+  }), null);
+  console.log('Шар тривог на скрінах:', off ? 'вимкнено' : '⚠️ не вдалося вимкнути');
 }
 
 // пуски: червона пульсуюча обводка навколо аеродрому / позиції пуску (БпЛА і балістика), аватарка маркера лишається видимою
