@@ -62,6 +62,7 @@ state.strat = state.strat || {};
 state.strat.sent = state.strat.sent || {};     // які події стратегів уже пішли в канал (ключ → час)
 state.strat.msgs = state.strat.v === 2 ? (state.strat.msgs || []) : [];   // v2: старі (хибні) новини з попередньої версії скидаємо
 state.strat.v = 2;     // розпізнані новини про стратегів: сайт відновлює з них сценарій (позиції бортів) після перезапуску
+state.stock = state.stock || { sent: {} };   // наявність БпЛА на пускових майданчиках: які снапшоти вже надіслано
 state.sched = state.sched || {};   // коли востаннє слали кожен тип: ballistic / launch / missile / situation
 function saveState() {
   const now = Date.now();
@@ -69,6 +70,7 @@ function saveState() {
   for (const k of Object.keys(state.news.sent)) if (now - state.news.sent[k].t > 24 * 3600000) delete state.news.sent[k];
   if (state.strat) { for (const k of Object.keys(state.strat.sent)) if (now - state.strat.sent[k] > 24 * 3600000) delete state.strat.sent[k];
     state.strat.msgs = (state.strat.msgs || []).filter(m => m && now - m.ts < 14 * 3600000).slice(-150); }
+  for (const k of Object.keys(state.stock.sent)) if (now - state.stock.sent[k] > 3 * 864e5) delete state.stock.sent[k];
   fs.mkdirSync(new URL('../state/', import.meta.url), { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 1));
 }
@@ -477,6 +479,18 @@ async function stratPass() {
 // Шлемо лише раз на добу (state.heat.lastDay) і лише протягом MIDNIGHT_GRACE_MIN хв після 00:00, щоб «станом на 00:00» не став «станом на 03:00».
 const MIDNIGHT = process.env.MIDNIGHT !== '0';                              // MIDNIGHT=0 вимикає нічний підсумок
 const MIDNIGHT_GRACE_MIN = Number(process.env.MIDNIGHT_GRACE_MIN ?? 45);
+// ── Наявність БпЛА на пускових майданчиках (снапшот «станом на …») — текстом, один раз на снапшот ──
+async function stockPass() {
+  const list = await page.evaluate(() => (window.StockWatch && StockWatch.pending ? StockWatch.pending() : []));
+  for (const it of list || []) {
+    if (!it || !it.key || state.stock.sent[it.key]) continue;
+    state.stock.sent[it.key] = Date.now(); saveState();
+    console.log(`Наявність БпЛА: ${it.key}`);
+    const r = await sendText(it.html + (footerHtml ? '\n\n' + footerHtml : ''));
+    if (!r.ok) { console.log(`::warning::Telegram sendMessage: ${r.description}`); delete state.stock.sent[it.key]; saveState(); }
+  }
+}
+
 async function midnightPass() {
   const d = heatmapDue(state, Date.now(), { graceMin: MIDNIGHT_GRACE_MIN });   // { day:'YYYY-MM-DD' } — попередня доба, або null
   if (!d) return;
@@ -518,6 +532,7 @@ for (;;) {
       await safe('ситуація', () => summaryPass('situation', 'drone', 'Ситуація БпЛА'));
       await safe('КАБ', kabPass);
       await safe('стратегічна авіація', stratPass);
+      await safe('наявність БпЛА', stockPass);
       if (MIDNIGHT) await safe('нічний підсумок', midnightPass);
     }
     fails = 0;
