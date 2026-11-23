@@ -479,16 +479,26 @@ async function stratPass() {
 // Шлемо лише раз на добу (state.heat.lastDay) і лише протягом MIDNIGHT_GRACE_MIN хв після 00:00, щоб «станом на 00:00» не став «станом на 03:00».
 const MIDNIGHT = process.env.MIDNIGHT !== '0';                              // MIDNIGHT=0 вимикає нічний підсумок
 const MIDNIGHT_GRACE_MIN = Number(process.env.MIDNIGHT_GRACE_MIN ?? 45);
-// ── Наявність БпЛА на пускових майданчиках (снапшот «станом на …») — текстом, один раз на снапшот ──
+// ── Наявність БпЛА / балістики на пускових майданчиках — зведенням двічі на день (13:00 і 22:00 за Києвом) ──
+const STOCK_SLOTS = (process.env.STOCK_SLOTS || '13:00,22:00').split(',').map(x => x.trim()).filter(Boolean);
+const STOCK_WINDOW_MIN = Number(process.env.STOCK_WINDOW_MIN || 120);   // якщо бот запустився із запізненням — шле в межах 2 год після слоту
+function kyivNow() {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+    .formatToParts(new Date()).map(x => [x.type, x.value]));
+  return { day: `${p.year}-${p.month}-${p.day}`, min: (+p.hour % 24) * 60 + +p.minute };
+}
 async function stockPass() {
-  const list = await page.evaluate(() => (window.StockWatch && StockWatch.pending ? StockWatch.pending() : []));
-  for (const it of list || []) {
-    if (!it || !it.key || state.stock.sent[it.key]) continue;
-    state.stock.sent[it.key] = Date.now(); saveState();
-    console.log(`Наявність БпЛА: ${it.key}`);
-    const r = await sendText(it.html + (footerHtml ? '\n\n' + footerHtml : ''));
-    if (!r.ok) { console.log(`::warning::Telegram sendMessage: ${r.description}`); delete state.stock.sent[it.key]; saveState(); }
-  }
+  const k = kyivNow();
+  const slot = STOCK_SLOTS.find(sl => { const [h, m] = sl.split(':').map(Number), t = h * 60 + (m || 0); return k.min >= t && k.min < t + STOCK_WINDOW_MIN; });
+  if (!slot) return;
+  const key = k.day + ' ' + slot;
+  if (state.stock.sent[key]) return;
+  const html = await page.evaluate(() => (window.StockWatch && StockWatch.digest ? StockWatch.digest(48) : ''));
+  state.stock.sent[key] = Date.now(); saveState();
+  if (!html) { console.log(`Наявність (${key}): даних за 48 год немає — пропускаю`); return; }
+  console.log(`Наявність: зведення ${key}`);
+  const r = await sendText(html + (footerHtml ? '\n\n' + footerHtml : ''));
+  if (!r.ok) { console.log(`::warning::Telegram sendMessage: ${r.description}`); delete state.stock.sent[key]; saveState(); }
 }
 
 async function midnightPass() {
