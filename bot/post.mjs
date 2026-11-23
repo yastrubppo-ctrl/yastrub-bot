@@ -355,6 +355,26 @@ function fitCaption(html) {
   const plain = html.replace(/<[^>]*>/g, '');
   return plain.slice(0, CAP_MAX - 1) + '…';
 }
+// Підпис: спершу пробуємо ВЕСЬ текст. Якщо Telegram відмовить через довжину — карта з початком тексту,
+// а решта ВІДПОВІДДЮ одразу під фото (без «…і ще N рядків»), нічого не губиться.
+const TOO_LONG = d => /caption.*too long|MEDIA_CAPTION_TOO_LONG|too long/i.test(String(d || ''));
+function splitCaption(html) {
+  html = String(html || '');
+  if (visLen(html) <= CAP_MAX) return { cap: html, rest: '' };
+  const lines = html.split('\n'); let k = 0;
+  while (k < lines.length && visLen(lines.slice(0, k + 1).join('\n')) <= CAP_MAX) k++;
+  if (k === 0) { const plain = html.replace(/<[^>]*>/g, ''); return { cap: plain.slice(0, CAP_MAX), rest: plain.slice(CAP_MAX) }; }
+  while (k > 1 && !lines[k - 1].trim()) k--;
+  return { cap: closeTags(lines.slice(0, k).join('\n')), rest: lines.slice(k).join('\n').replace(/^\s+/, '') };
+}
+async function sendRest(rest, replyTo) {
+  if (!rest || !rest.trim()) return;
+  const b = new FormData(); b.append('chat_id', TG_CHAT_ID); b.append('parse_mode', 'HTML'); b.append('disable_web_page_preview', 'true');
+  b.append('text', rest); if (replyTo) b.append('reply_to_message_id', String(replyTo));
+  let r = await api('sendMessage', b);
+  if (!r.ok) { const b2 = new FormData(); b2.append('chat_id', TG_CHAT_ID); b2.append('text', rest.replace(/<[^>]*>/g, '')); if (replyTo) b2.append('reply_to_message_id', String(replyTo)); r = await api('sendMessage', b2); }
+  console.log('sendMessage (продовження)', JSON.stringify(r).slice(0, 160));
+}
 async function sendReport(text, shotBuf) {
   const shot = shotBuf || await takeShot();
   const form = new FormData();
@@ -363,10 +383,17 @@ async function sendReport(text, shotBuf) {
   form.append('disable_web_page_preview', 'true');
   let ok = true;
   const check = (label, res) => { console.log(label, JSON.stringify(res).slice(0, 300)); if (!res || !res.ok) { ok = false; console.log(`::warning::Telegram ${label}: ${res && res.description}`); } };
-  // завжди ОДНЕ повідомлення: карта + текст у підписі (довгий текст скорочується)
-  form.append('caption', fitCaption(text));
+  // карта + ВЕСЬ текст у підписі
+  form.append('caption', String(text));
   form.append('photo', new Blob([shot], { type: 'image/jpeg' }), 'map.jpg');
   let res = await api('sendPhoto', form);
+  if (!res.ok && TOO_LONG(res.description)) {
+    const { cap, rest } = splitCaption(text);
+    const f3 = new FormData(); f3.append('chat_id', TG_CHAT_ID); f3.append('parse_mode', 'HTML');
+    f3.append('caption', cap); f3.append('photo', new Blob([shot], { type: 'image/jpeg' }), 'map.jpg');
+    res = await api('sendPhoto', f3);
+    if (res.ok) await sendRest(rest, res.result && res.result.message_id);
+  }
   if (!res.ok && /parse|entit|caption/i.test(String(res.description || ''))) {   // зламалась розмітка — шлемо той самий підпис простим текстом
     const f2 = new FormData(); f2.append('chat_id', TG_CHAT_ID);
     f2.append('caption', fitCaption(String(text).replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')));
@@ -409,14 +436,18 @@ async function summaryPass(key, cat, label) {
 // Виліт, пусковий маневр, пуск, підліт ракет до кордону, повернення — ОДРАЗУ (незалежно від паузи); у польоті — оновлення раз на STRAT_MIN хв.
 const STRAT_URGENT = { launch: 5, maneuver: 4, takeoff: 3, etaBorder: 2, rtb: 1 };
 async function sendAlbum(text, shots) {
-  const fd = new FormData();
-  fd.append('chat_id', TG_CHAT_ID);
-  const capText = fitCaption(text);   // текст — підписом до альбому, не окремим повідомленням
-  fd.append('media', JSON.stringify(shots.map((_, i) => ({ type: 'photo', media: 'attach://p' + i, ...(i === 0 ? { caption: capText, parse_mode: 'HTML' } : {}) }))));
-  shots.forEach((b, i) => fd.append('p' + i, new Blob([b], { type: 'image/jpeg' }), 'p' + i + '.jpg'));
-  const r = await api('sendMediaGroup', fd);
+  const go = cap => {
+    const fd = new FormData();
+    fd.append('chat_id', TG_CHAT_ID);
+    fd.append('media', JSON.stringify(shots.map((_, i) => ({ type: 'photo', media: 'attach://p' + i, ...(i === 0 ? { caption: cap, parse_mode: 'HTML' } : {}) }))));
+    shots.forEach((b, i) => fd.append('p' + i, new Blob([b], { type: 'image/jpeg' }), 'p' + i + '.jpg'));
+    return api('sendMediaGroup', fd);
+  };
+  let r = await go(String(text)), rest = '';                      // спершу весь текст підписом
+  if (!r.ok && TOO_LONG(r.description)) { const sp = splitCaption(text); rest = sp.rest; r = await go(sp.cap); }
   console.log('sendMediaGroup', JSON.stringify(r).slice(0, 200));
   if (!r.ok) { console.log(`::warning::Telegram sendMediaGroup: ${r.description}`); return sendReport(text, shots[0]); }   // запасний шлях — одне фото
+  if (rest) await sendRest(rest, r.result && r.result[0] && r.result[0].message_id);
   return true;
 }
 async function stratPass() {
