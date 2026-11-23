@@ -63,6 +63,7 @@ const THREAT_RE   = /можлив|ймов[іи]рн|в[іі]рогідн|заг
 const LAUNCH_RE   = /(?:^|[^\p{L}])(?:пуск|запуск|запущен|запустил|запустили|запущено|стартува|стартов|старт(?![\p{L}])|взл[её]т|злет|злетіл|вилет|вилітає|виліт|вышл|вийшл|вийшов|випущен|випустил|кинул)/u;
 const NEG_RE      = /(?:пуск|запуск)\p{L}*[^.!?]{0,40}(?:нем[аєе]|не\s+(?:було|зафікс|фікс))|без\s+нових\s+пуск|в[іи]дб[іо]й|відсутн|не\s+(?:зафіксов|фіксу|відбув|зафиксир|фиксир|було)|нем[аєе]є?\s+(?:пуск|запуск)|без\s+пуск/u;
 // доставка / переміщення: «доставили шахеди залізницею», «прибув ешелон з БР», «доставка БР до Нявлі»
+const STOCK_RE    = /(?:в|у)\s+готовност|в\s+наявност|наявн\p{L}*\s+(?:має|мають|є|перебува)|має\s+(?:в|у)\s+(?:готовн|наявн)|(?:запас|залишок)\p{L}*\s+(?:бпла|шахед|ракет|іскандер)/u;
 const DELIV_RE    = /достав|дов[еі]з|дов[оі]з|зав[еі]з|зав[оі]з|прив[еі]з|прив[оі]з|прибув|прибул|надійшов|надійшл|ешелон|эшелон|потяг|поезд|вагон|залізни[чц]|железнодорож|перекид|переброс|розвантаж|разгруз|парті(?:я|ї)\s+(?:шахед|бпла|ракет)/u;
 const TRANSPORTS = [
   ['залізницею',    /ешелон|эшелон|потяг|поезд|вагон|залізни[чц]|железнодорож|(?:^|[^\p{L}])жд(?![\p{L}])|цистерн/u],
@@ -152,7 +153,7 @@ function parseDelivery(clause, t, { ball, drone }) {
   if (!cargo.length) cargo.push('missile');
   const transport = (TRANSPORTS.find(([, re]) => re.test(t)) || [null])[0];
   const missiles = MISSILES.filter(([, re]) => re.test(t)).map(([n]) => n);
-  const cm = /(\d{1,4})\s*(?:шт\.?\s*)?(?:бпла|шахед\p{L}*|shahed|дрон\p{L}*|ракет\p{L}*|бр(?![\p{L}])|вагон\p{L}*|ешелон\p{L}*|эшелон\p{L}*|одиниц\p{L}*|од(?![\p{L}]))/u.exec(t);
+  const cm = /(\d{1,4})\s*(?:шт\.?\s*)?(?:(?:балістичн|крилат|реактивн|ударн|нов)\p{L}*\s+)?(?:бпла|шахед\p{L}*|shahed|дрон\p{L}*|ракет\p{L}*|бр(?![\p{L}])|вагон\p{L}*|ешелон\p{L}*|эшелон\p{L}*|одиниц\p{L}*|од(?![\p{L}]))/u.exec(t);
   const count = cm ? Number(cm[1]) : null;
   const unitWagons = !!(cm && /вагон/u.test(cm[0]));
   const unitTrains = !!(cm && /[еэ]шелон/u.test(cm[0]));
@@ -165,7 +166,7 @@ function parseDelivery(clause, t, { ball, drone }) {
   if (sites.length) return sites.map(site => ({ ...base, site, region: site.region }));
   const ro = regionObjIn(t);
   if (ro) {
-    if (!REGION_TO_SITES[ro.id]) return [];             // Воронеж, Бєлгород, Астрахань… — пускових майданчиків там нема
+    if (!REGION_TO_SITES[ro.id]) return [];             // Воронеж, Бєлгород, Астрахань… — пускових майданчиків там нема             // Воронеж, Бєлгород, Астрахань… — пускових майданчиків там нема
     return [{ ...base, site: { id: null, name: ro.name, region: null }, region: ro.name, regionId: ro.id }];
   }
   // невідоме місце (Мукачеве, Харків, Харківщина…) — це не аеродром зі списку SITES: подію не створюємо
@@ -185,7 +186,8 @@ function extractDeliveryLists(text, events) {
       const t = norm(line);
       if (!t.trim()) continue;
       const drone = DRONE_RE.test(t), ball = BALL_STRONG.test(t) || (!drone && BALL_WEAK.test(t));
-      if ((drone || ball) && DELIV_RE.test(t) && /:\s*$/.test(line.trim())) { ctx = { drone, ball }; continue; }   // заголовок списку
+      if ((drone || ball) && DELIV_RE.test(t) && /:\s*$/.test(line.trim())) { ctx = { drone, ball }; continue; }
+      if (DELIV_RE.test(t) && /:\s*$/.test(line.trim()) && /аеродром|майданчик|локаці|пусков/u.test(t)) { ctx = { drone: !/ракет/u.test(t), ball: /ракет/u.test(t) }; continue; }   // «На аеродроми доставлено:»   // заголовок списку
       const m = ctx && LIST_LINE.exec(line);
       if (m) {
         const synth = `${m[1]} — ${m[2]} од. ${m[3] || ''}`;
@@ -217,6 +219,9 @@ export function parseNews(rawText) {
   for (const clause of clauses) {
     const t = norm(clause);
     if (NEG_RE.test(t)) continue;                               // «відбій», «пусків не зафіксовано»
+    // «Станом на сьогодні на Брянщині в готовності ~14 Іскандер-М…», «в наявності 310 реактивних БпЛА…» — це запаси, а не пуск/загроза (облік — у stock.js на сайті)
+    if (STOCK_RE.test(t) && !LAUNCH_RE.test(t)) continue;
+    if (/попереджен\p{L}*[^.!?]{0,80}не\s+отрим|не\s+отрим\p{L}*[^.!?]{0,40}попереджен|попереджен\p{L}*[^.!?]{0,40}(?:нема|відсутн)/u.test(t)) continue;
     if (lastEvs.length && !DRONE_RE.test(t) && !BALL_STRONG.test(t) && (THREAT_RE.test(t) || /атакув|ударит|курсом/u.test(t))) {
       const tg = targetsIn(t);                                  // «Ймовірно спробують атакувати Миколаївщину/Одещину.»
       if (tg.length) { lastEvs.forEach(e => { e.targets = [...new Set([...(e.targets || []), ...tg])]; }); continue; }
@@ -229,7 +234,11 @@ export function parseNews(rawText) {
     const cargo = ball || drone || /ракет/u.test(t);
     // ── ДОСТАВКА (БР / шахеди): окремий тип події ──
     if (cargo && DELIV_RE.test(t) && !(isLaunch && !/достав|ешелон|эшелон|потяг|поезд|вагон/u.test(t))) {
-      events.push(...parseDelivery(clause, t, { ball, drone }));
+      // «Брянщина — 10 ракет, Воронежчина — 6 ракет» — кілька місць в одному реченні: кожне окремо, зі своєю кількістю
+      const pairs = clause.match(/[—–-]\s*\d{1,4}\s/gu) || [];
+      if (pairs.length > 1) {
+        clause.split(/[,;]|\s(?:а|і|й|та)\s/u).forEach(seg => { const ts = norm(seg); if (/\d/.test(ts)) events.push(...parseDelivery(seg, ts, { ball, drone })); });
+      } else events.push(...parseDelivery(clause, t, { ball, drone }));
       continue;
     }
     // Неявний пуск: канали часто пишуть без слова «пуск» — «Шахеди з Міллерово…», «Балістика з Курщини!», «Групи БпЛА з Курська…».
