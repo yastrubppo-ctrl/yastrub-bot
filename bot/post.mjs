@@ -532,6 +532,18 @@ async function stockPass() {
   if (!r.ok) { console.log(`::warning::Telegram sendMessage: ${r.description}`); delete state.stock.sent[key]; saveState(); }
 }
 
+// ── Попередження «протягом 48 год» (райони, населені пункти, ймовірні цілі) — одразу, один раз на попередження ──
+async function warnPass() {
+  const list = await page.evaluate(() => (window.StockWatch && StockWatch.warnPending ? StockWatch.warnPending() : []));
+  for (const it of list || []) {
+    if (!it || !it.key || state.stock.sent[it.key]) continue;
+    state.stock.sent[it.key] = Date.now(); saveState();
+    console.log(`Попередження: ${it.key}`);
+    const r = await sendText(it.html + (footerHtml ? '\n\n' + footerHtml : ''));
+    if (!r.ok) { console.log(`::warning::Telegram sendMessage: ${r.description}`); delete state.stock.sent[it.key]; saveState(); }
+  }
+}
+
 async function midnightPass() {
   const d = heatmapDue(state, Date.now(), { graceMin: MIDNIGHT_GRACE_MIN });   // { day:'YYYY-MM-DD' } — попередня доба, або null
   if (!d) return;
@@ -574,6 +586,7 @@ for (;;) {
       await safe('КАБ', kabPass);
       await safe('стратегічна авіація', stratPass);
       await safe('наявність БпЛА', stockPass);
+      await safe('попередження', warnPass);
       if (MIDNIGHT) await safe('нічний підсумок', midnightPass);
     }
     fails = 0;

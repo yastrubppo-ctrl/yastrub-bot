@@ -180,16 +180,22 @@ function parseDelivery(clause, t, { ball, drone }) {
 const LIST_LINE = /^\s*[-•*–]?\s*([^—–:]{2,60}?)\s*[—–-]\s*(\d{1,4})\s*(?:од(?:иниц\p{L}*|\.)?|шт\.?|бпла)?\s*(?:\(([^)]*)\))?/u;
 function extractDeliveryLists(text, events) {
   const keep = [];
+  let ctx = null, ctxBlock = -1, bi = 0;
   for (const block of text.split(BLOCK)) {
-    let ctx = null;
+    bi++;
+    if (ctx && ctxBlock !== bi - 1) ctx = null;          // заголовок «…а саме:» діє і через порожній рядок, але не далі
     for (const line of block.split('\n')) {
       const t = norm(line);
       if (!t.trim()) continue;
       const drone = DRONE_RE.test(t), ball = BALL_STRONG.test(t) || (!drone && BALL_WEAK.test(t));
-      if ((drone || ball) && DELIV_RE.test(t) && /:\s*$/.test(line.trim())) { ctx = { drone, ball }; continue; }
-      if (DELIV_RE.test(t) && /:\s*$/.test(line.trim()) && /аеродром|майданчик|локаці|пусков/u.test(t)) { ctx = { drone: !/ракет/u.test(t), ball: /ракет/u.test(t) }; continue; }   // «На аеродроми доставлено:»   // заголовок списку
-      const m = ctx && LIST_LINE.exec(line);
+      if ((drone || ball) && DELIV_RE.test(t) && /:\s*$/.test(line.trim())) { ctx = { drone, ball }; ctxBlock = bi; continue; }
+      if (DELIV_RE.test(t) && /:\s*$/.test(line.trim()) && /аеродром|майданчик|локаці|пусков/u.test(t)) { ctx = { drone: !/ракет/u.test(t), ball: /ракет/u.test(t) }; ctxBlock = bi; continue; }   // «На аеродроми доставлено:»   // заголовок списку
+      const m = ctx && LIST_LINE.exec(line.replace(/^[\s\/|!❗️⚠️‼️]+/u, ''));
       if (m) {
+        ctxBlock = bi;
+        // «8 балістичних/гіперзвукових ракет + 7 крилатих ракет типу Іскандер-К» — сумуємо
+        const plus = [...line.slice(line.indexOf(m[2]) + m[2].length).matchAll(/\+\s*(\d{1,4})/gu)].reduce((a, x) => a + Number(x[1]), 0);
+        if (plus) m[2] = String(Number(m[2]) + plus);
         const synth = `${m[1]} — ${m[2]} од. ${m[3] || ''}`;
         const evs = parseDelivery(synth, norm(synth), ctx);
         evs.forEach(e => { e.count = Number(m[2]); });
