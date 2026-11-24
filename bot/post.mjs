@@ -527,6 +527,10 @@ async function stockPass() {
   const html = await page.evaluate(() => (window.StockWatch && StockWatch.digest ? StockWatch.digest(48) : ''));
   state.stock.sent[key] = Date.now(); saveState();
   if (!html) { console.log(`Наявність (${key}): даних за 48 год немає — пропускаю`); return; }
+  // те саме, що вже відправляли (нічого не змінилось) — не дублюємо
+  const sig = html.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  if (state.stock.lastSig === sig) { console.log(`Наявність (${key}): без змін від минулого зведення — пропускаю`); return; }
+  state.stock.lastSig = sig; saveState();
   console.log(`Наявність: зведення ${key}`);
   const r = await sendText(html + (footerHtml ? '\n\n' + footerHtml : ''));
   if (!r.ok) { console.log(`::warning::Telegram sendMessage: ${r.description}`); delete state.stock.sent[key]; saveState(); }
@@ -586,7 +590,6 @@ for (;;) {
       await safe('КАБ', kabPass);
       await safe('стратегічна авіація', stratPass);
       await safe('наявність БпЛА', stockPass);
-      await safe('попередження', warnPass);
       if (MIDNIGHT) await safe('нічний підсумок', midnightPass);
     }
     fails = 0;
