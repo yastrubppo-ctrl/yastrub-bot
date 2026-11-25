@@ -568,9 +568,12 @@ export function aggregateDeliveries(raw, { now = Date.now(), days = 7 } = {}) {
       }
       if (ev.count == null) continue;
       const gk = day + '|' + metric + '|' + tg.key;
-      const g = groups.get(gk) || { max: 0 };
-      if (ev.count <= g.max) continue;                       // повтор / менше число — вже враховано
-      const delta = ev.count - g.max; g.max = ev.count; groups.set(gk, g);
+      // кожна доставка — ПЛЮС (довезли 130 → +130); той самий обсяг того ж дня від іншого каналу — повтор, не рахуємо
+      if ((metric === 'ballistic' && ev.count > 80) || (metric === 'missile' && ev.count > 120) || (metric === 'drone' && ev.count > 1000)) continue;   // нереальні числа (запаси/річні підсумки) — не доставка
+      const g = groups.get(gk) || { seen: new Set(), max: 0 };
+      if (g.seen.has(ev.count)) continue;
+      g.seen.add(ev.count); groups.set(gk, g);
+      const delta = ev.count; g.max += delta;
       const parts = tg.ids.length === 1 ? [[tg.ids[0], delta]] : splitEven(delta, tg.ids, gk + ':' + g.max);
       for (const [id, v] of parts) {
         add(id, day, metric + (tg.est && unit === 'items' ? 'Est' : ''), v);
