@@ -616,6 +616,9 @@ const STRAT_TYPES = [
 ];
 const STRAT_RE   = /ту-?\s?95|ту-?\s?160|ту-?\s?22|м[іи]г-?\s?31|стратег\p{L}*\s+(?:авіац|авиац)|стратегическ\p{L}*\s+авиац/u;
 const STRAT_OUT  = /виліт|вилет|вилітає|вилітіл|вилетіл|злет|взл[её]т|злетіл|підняли|піднялис|подн[яи]лис|(?:в|у)\s+повітр[іяї]|(?:в|у)\s+воздух|бойов\p{L}*\s+(?:курс|чергув)|на\s+курс/u;
+const STRAT_TRAIN  = /тренуван|тренировк|навчальн|навчан|учени[йяеі]|учебн|патрулюв|патрулир|без\s+загроз|без\s+угроз|японськ\p{L}*\s+мор|охотськ\p{L}*\s+мор|берингов|баренцов|норвезьк\p{L}*\s+мор|тихо(?:му|го)\s+океан|арктик/u;
+const STRAT_RELOC  = /передислок|перебаз|переліт|перелет|перегін|перегон|поверта\p{L}*\s+на\s+(?:ае\.?|аеродром)|повернувс\p{L}*\s+на\s+(?:ае\.?|аеродром)/u;
+const STRAT_COMBAT = /рубеж|рубіж|пусков|маневр|(?:^|[^\p{L}])пуск|запуск|х-?\s?101|х-?\s?555|крилат|курс\p{L}*\s+на\s+захід|у\s+бік\s+україн|бойов/u;
 const STRAT_END  = /відб[іи]й|посадк|повернул|повернув|приземл|сіл[иа]\s+на\s+аеродром/u;
 const FLEET_RE   = /флот|корабл|корабел|ракетоносі|ракетоносц|носі\p{L}*\s+калібр|калібр|підводн|подводн|(?:^|[^\p{L}])нк(?![\p{L}])/u;
 const FLEET_ON   = /вийш|вийд|вихід|вивед|вивели|акватор|(?:в|у)\s+мор[іе]|на\s+бойов|вахт/u;
@@ -625,16 +628,25 @@ const CLAUSE_SPLIT = /\u2063+|\n|\+|(?<!(?:^|\s)од\.)(?<=[.!?])\s+/u;
 
 export function midnightFacts(news, live, { now = Date.now(), hours = 24 } = {}) {
   live = live || {};
-  const strat = new Set(), seas = new Set(), evs = [];
+  const strat = new Set(), seas = new Set(), evs = [], train = new Set(), reloc = new Set(), combat = new Set();
   let fleet = false;
   for (const n of news || []) {
     const ts = Date.parse(n.date);
     if (!isFinite(ts) || now - ts > hours * 3600e3 || ts - now > 10 * 60000) continue;
     const text = stripEmoji(n.text);
     evs.push(...parseNews(n.text).filter(e => e.kind === 'ballistic'));
+    // стратегічна авіація: тип польоту визначаємо по ВСЬОМУ повідомленню (уточнення «здійснюють тренування» часто в наступному рядку)
+    const full = norm(text);
+    let msgKind = null;
+    if (STRAT_RE.test(full) && !/(?:^|[^\p{L}])(?:можлив|ймовірн|загроз)\p{L}*\s+(?:виліт|вилет|злет)/u.test(full)) {
+      const types = STRAT_TYPES.filter(([, re]) => re.test(full)).map(([nm]) => nm);
+      if (STRAT_TRAIN.test(full)) { msgKind = 'train'; types.forEach(x => train.add(x)); }
+      else if (STRAT_RELOC.test(full) && !STRAT_COMBAT.test(full)) { msgKind = 'reloc'; types.forEach(x => reloc.add(x)); }
+      else if (STRAT_COMBAT.test(full) && !NEG_RE.test(full)) types.forEach(x => combat.add(x));
+    }
     for (const clause of text.split(CLAUSE_SPLIT).map(x => x.trim()).filter(Boolean)) {
       const t = norm(clause);
-      if (STRAT_RE.test(t) && STRAT_OUT.test(t) && !STRAT_END.test(t) && !NEG_RE.test(t)) {
+      if (!msgKind && STRAT_RE.test(t) && STRAT_OUT.test(t) && !STRAT_END.test(t) && !NEG_RE.test(t)) {
         const found = STRAT_TYPES.filter(([, re]) => re.test(t)).map(([nm]) => nm);
         (found.length ? found : ['стратегічна авіація']).forEach(x => strat.add(x));
       }
@@ -651,7 +663,8 @@ export function midnightFacts(news, live, { now = Date.now(), hours = 24 } = {})
   ships.forEach(sh => { if (sh && sh.sea) seas.add(sh.sea); });
   return {
     air: { drones: live.drones || 0, missiles: live.missiles || 0, ballistic: live.ballistic || 0 },
-    strat: { departed: [...strat], live: liveStrat },
+    // «виліт» того самого типу, що й тренування/передислокація, без бойових ознак — це той самий політ (уточнили пізніше)
+    strat: { departed: [...strat].filter(x => combat.has(x) || !(train.has(x) || reloc.has(x))), train: [...train], reloc: [...reloc], combat: [...combat], live: liveStrat },
     ballistic: {
       launches: uniq(bal.filter(e => e.status === 'launch').map(e => e.region || 'місце не уточнено')),
       threats: uniq(bal.filter(e => e.status === 'threat').map(e => e.region || 'місце не уточнено')),
@@ -671,12 +684,17 @@ export function formatMidnight(f, { now = Date.now(), footerHtml } = {}) {
     : '✅ У повітряному просторі України БпЛА не зафіксовано.');
   if (f.air.missiles > 0) L.push('🚀 Ракети в повітряному просторі: ' + f.air.missiles + '.');
   // стратегічна авіація
+  // уточнюємо, ЩО саме було: бойовий виліт / тренування / передислокація — а не просто «були вильоти»
   const sl = f.strat.live.map(([k, v]) => (STRAT_LIVE_NAME[k] || k) + (v > 1 ? ' ×' + v : ''));
-  if (f.strat.departed.length || sl.length) {
-    const names = [...new Set([...f.strat.departed.filter(x => x !== 'стратегічна авіація'), ...f.strat.live.map(([k]) => STRAT_LIVE_NAME[k] || k)])];
-    L.push('✈️ Були зафіксовані вильоти стратегічної авіації' + (names.length ? ' (' + esc(names.join(', ')) + ')' : '') + '.'
-      + (sl.length ? ' Зараз у повітрі: ' + esc(sl.join(', ')) + '.' : ''));
-  } else L.push('✈️ Вильотів стратегічної авіації не зафіксовано.');
+  const tr = f.strat.train || [], rl = f.strat.reloc || [], cb = f.strat.combat || [];
+  const dep = f.strat.departed.filter(x => x !== 'стратегічна авіація' || (!tr.length && !rl.length));
+  const nm = a => a.filter(x => x !== 'стратегічна авіація');
+  const lst = a => nm(a).length ? ' (' + esc(nm(a).join(', ')) + ')' : '';
+  if (dep.length) L.push((cb.length ? '✈️🔴 Були зафіксовані бойові вильоти стратегічної авіації' : '✈️ Були зафіксовані вильоти стратегічної авіації') + lst(dep) + '.');
+  if (tr.length) L.push('🎯 Стратегічна авіація проводила тренування' + lst(tr) + ' — без загрози для України.');
+  if (rl.length) L.push('🔁 Передислокація стратегічної авіації' + lst(rl) + '.');
+  if (sl.length) L.push('🛩 Зараз у повітрі: ' + esc(sl.join(', ')) + (!dep.length && tr.length ? ' (тренування).' : '.'));
+  if (!dep.length && !tr.length && !rl.length && !sl.length) L.push('✈️ Вильотів стратегічної авіації не зафіксовано.');
   // балістика
   const b = f.ballistic, mis = b.missiles.length ? ' (' + esc(b.missiles.join(' / ')) + ')' : '';
   if (b.launches.length) L.push('🚀🔴 Були пуски балістики з: ' + esc(b.launches.join(', ')) + mis + '.');
