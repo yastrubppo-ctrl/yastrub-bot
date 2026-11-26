@@ -286,7 +286,10 @@ export function parseNews(rawText) {
       const where = after ? after[1] : '';
       const ros = []; for (const r of REGIONS) if (r.re.test(where) && !ros.some(x => x.id === r.id)) ros.push(r);
       const status = ((isLaunch || implied) && !isThreat) ? 'launch' : 'threat';
-      if (!ros.length) events.push({ kind: 'ballistic', status, region: null, regionId: null, missiles });
+      // без конкретного району — лише якщо канал назвав напрямок («з півночі»), інакше подію не створюємо (жодного «місце не уточнено»)
+      const dir = /з\s+північного\s+сходу|с\s+северо-?востока/u.test(t) ? 'північно-східний напрямок' : /з\s+півночі|с\s+севера/u.test(t) ? 'північний напрямок'
+        : /з\s+південного\s+сходу|с\s+юго-?востока/u.test(t) ? 'південно-східний напрямок' : /зі?\s+сходу|с\s+востока/u.test(t) ? 'східний напрямок' : /з\s+півдня|с\s+юга/u.test(t) ? 'південний напрямок' : null;
+      if (!ros.length) events.push({ kind: 'ballistic', status, region: dir, regionId: null, missiles });
       else for (const ro of ros) events.push({ kind: 'ballistic', status, region: ro.name, regionId: ro.id, missiles });
       lastEvs = events.slice(made);
       continue;
@@ -325,8 +328,13 @@ export function parseNews(rawText) {
       lastEvs = events.slice(made);
     }
   }
-  return events;
+  // ── фільтр «маячні» ──
+  // 1) підсумки/звіти про минулу атаку («У ніч на 26 листопада противник атакував… з Курської області. Збито…») — це не новий пуск і не загроза
+  if (SUMMARY_RE.test(norm(text))) return events.filter(e => e.kind === 'delivery');
+  // 2) балістика без району і без напрямку («Загроза балістики», «Балістика на Київ!», «Пуск балістики!») — не публікуємо: нема що показати
+  return events.filter(e => !(e.kind === 'ballistic' && !e.region));
 }
+const SUMMARY_RE = /(?:^|[^\p{L}])(?:у|в)\s+ніч\s+(?:на|з)\s|(?:^|[^\p{L}])(?:в|у)\s+ночь\s+на\s|протягом\s+(?:ночі|доби|дня|минулої)|(?:ворог|противник|рф|росі\p{L}*)\s+(?:\p{L}+\s+){0,2}(?:атакував|атакувала|завдав|завдала|випустив|випустила|запустив|запустила)(?![\p{L}])|станом\s+на\s+\d{1,2}[:.]\d{2}|(?:збито|збили|знешкоджено|подавлено|уражено)\s+(?:\p{L}+\s+){0,2}\d|повітрян\p{L}*\s+напад/u;
 
 // ── Злиття подій одного повідомлення/запуску (максимум груп, об'єднання ракет) ──
 export function mergeEvents(list) {
