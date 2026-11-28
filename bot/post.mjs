@@ -64,6 +64,7 @@ state.strat.msgs = state.strat.v === 2 ? (state.strat.msgs || []) : [];   // v2:
 state.strat.v = 2;     // розпізнані новини про стратегів: сайт відновлює з них сценарій (позиції бортів) після перезапуску
 state.stock = state.stock || { sent: {} };   // наявність БпЛА на пускових майданчиках: які снапшоти вже надіслано
 state.sched = state.sched || {};   // коли востаннє слали кожен тип: ballistic / launch / missile / situation
+state.boom = state.boom || { sent: {}, last: 0 };   // вибухи з новин: місто → коли востаннє публікували
 function saveState() {
   const now = Date.now();
   for (const k of Object.keys(state.kab)) if (now - state.kab[k] > 24 * 3600000) delete state.kab[k];
@@ -71,6 +72,7 @@ function saveState() {
   if (state.strat) { for (const k of Object.keys(state.strat.sent)) if (now - state.strat.sent[k] > 24 * 3600000) delete state.strat.sent[k];
     state.strat.msgs = (state.strat.msgs || []).filter(m => m && now - m.ts < 14 * 3600000).slice(-150); }
   for (const k of Object.keys(state.stock.sent)) if (now - state.stock.sent[k] > 3 * 864e5) delete state.stock.sent[k];
+  for (const k of Object.keys(state.boom.sent)) if (now - state.boom.sent[k] > 24 * 3600000) delete state.boom.sent[k];
   fs.mkdirSync(new URL('../state/', import.meta.url), { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 1));
 }
@@ -548,6 +550,35 @@ async function warnPass() {
   }
 }
 
+// ── ВИБУХИ З НОВИН: «💥 Вибухи · Харків (Салтівка) — 08:41» ──
+// Сайт (BoomWatch) розбирає стрічку: «вибухи у Харкові», «Харків — гучно», «#Суми прильоти», «Взрывы в Днепре»; відкидає «планові вибухові роботи»,
+// «вибухів не було», міста РФ і власний канал. Бот шле одразу, одним повідомленням; те саме місто — не частіше ніж раз на BOOM_CITY_MIN хв.
+const BOOM_ALERTS = process.env.BOOM_ALERTS !== '0';                  // BOOM_ALERTS=0 вимикає
+const BOOM_MIN = Number(process.env.BOOM_MIN || 2);                  // пауза між повідомленнями про вибухи
+const BOOM_CITY_MIN = Number(process.env.BOOM_CITY_MIN || 30);        // те саме місто повторно — не раніше ніж через N хв
+const BOOM_FRESH_MIN = Number(process.env.BOOM_FRESH_MIN || 12);      // старші новини (після перезапуску) не публікуємо
+async function boomPass() {
+  if (!BOOM_ALERTS || Date.now() - (state.boom.last || 0) < BOOM_MIN * 60000) return;
+  const list = await page.evaluate(fm => (window.BoomWatch && BoomWatch.log ? BoomWatch.log().filter(x => Date.now() - x.ts < fm * 60000 && Date.now() - x.ts > -5 * 60000) : []), BOOM_FRESH_MIN);
+  const now = Date.now(), fresh = [];
+  for (const x of (list || []).sort((a, b) => a.ts - b.ts)) {
+    const prev = state.boom.sent[x.n];
+    if (prev && now - prev < BOOM_CITY_MIN * 60000) continue;
+    const f = fresh.find(y => y.n === x.n);
+    if (f) { (x.subs || []).forEach(sb => { if (!f.subs.includes(sb)) f.subs.push(sb); }); f.k = (f.k || 1) + (x.k || 1); continue; }
+    fresh.push({ n: x.n, ts: x.ts, obl: !!x.obl, subs: (x.subs || []).slice(), k: x.k || 1 });
+  }
+  if (!fresh.length) return;
+  const hm = ts => new Date(ts).toLocaleTimeString('uk-UA', { timeZone: 'Europe/Kyiv', hour: '2-digit', minute: '2-digit' });
+  const esc = v => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const lines = fresh.map(x => '📍 ' + esc(x.n) + (x.subs.length ? ' (' + esc(x.subs.join(', ')) + ')' : '') + ' — ' + hm(x.ts) + (x.k > 1 ? ' · підтверджують ' + x.k + ' джерела' : ''));
+  const html = '💥 <b>' + (fresh.length > 1 ? 'Вибухи' : 'Вибухи — ' + esc(fresh[0].n)) + '</b>\n' + lines.join('\n') + '\n<i>За даними моніторингових каналів</i>' + (footerHtml ? '\n\n' + footerHtml : '');
+  console.log(`Вибухи: ${fresh.map(x => x.n).join(', ')}`);
+  const r = await sendText(html);
+  if (r.ok) { fresh.forEach(x => { state.boom.sent[x.n] = now; }); state.boom.last = now; saveState(); }
+  else console.log(`::warning::Вибухи не надіслано: ${r.description}`);
+}
+
 async function midnightPass() {
   const d = heatmapDue(state, Date.now(), { graceMin: MIDNIGHT_GRACE_MIN });   // { day:'YYYY-MM-DD' } — попередня доба, або null
   if (!d) return;
@@ -588,6 +619,7 @@ for (;;) {
       await safe('ракети', () => summaryPass('missile', 'missile', 'Ракети'));
       await safe('ситуація', () => summaryPass('situation', 'drone', 'Ситуація БпЛА'));
       await safe('КАБ', kabPass);
+      await safe('вибухи', boomPass);
       await safe('стратегічна авіація', stratPass);
       await safe('наявність БпЛА', stockPass);
       if (MIDNIGHT) await safe('нічний підсумок', midnightPass);
