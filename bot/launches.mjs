@@ -265,6 +265,7 @@ function ballDir(t) {
     ['південний', /з\s+півдня|с\s+юга|(?:^|[^\p{L}-])південн\p{L}*\s+напрям|(?:^|[^\p{L}-])южн\p{L}*\s+направлени|з\s+моря|з\s+криму\s+та\s+моря/u]];
   const f = D.find(([, re]) => re.test(t)); return f ? f[0] + ' напрямок' : null;
 }
+const RECAP_RE = /відбул\p{L}*\s+(?:\p{L}+\s+){0,2}пуск|пуски\s+(?:\p{L}+\s+){0,3}(?:відбулис|відбулися|були)|були\s+(?:зафіксован\p{L}*\s+)?пуски|зафіксован\p{L}*\s+пуски\s+(?:\p{L}+\s+){0,3}з\s/u;
 const MIG31_RE = /м[іи]г-?\s?31|mig-?\s?31/u;
 // кількість балістичних ракет: «8 балістичних», «2 БР», «4 Іскандерів», «ще одна балістика», «3х КН-23»
 const BW = { 'одна': 1, 'одну': 1, 'один': 1, 'одного': 1, 'дві': 2, 'два': 2, 'двох': 2, 'две': 2, 'пара': 2, 'три': 3, 'трьох': 3, 'чотири': 4, 'четыре': 4, "п'ять": 5, 'пять': 5, 'шість': 6, 'шесть': 6 };
@@ -394,6 +395,9 @@ export function parseNews(rawText) {
     }
     if (drone) {                                  // ── БпЛА ──
       const droneAll = JET_W.test(t);
+      // «реактивні» стоїть ПЕРЕД першим майданчиком і в реченні не згадано інших типів → стосується всіх майданчиків списку
+      const jm0 = JET_W.exec(t), fs0 = Math.min(...SITES.map(x => { const m = x.re.exec(t); return m ? m.index : 1e9; }));
+      const jetLead = !!jm0 && jm0.index < fs0 && !/звичайн|поршнев|класичн|(?:^|[^\p{L}])шахед|герань-?\s?2|geran-?\s?2/u.test(t.replace(JET_W, ' '));
       const segs = clause.split(/\s*[,;]\s*|\s+(?:та|и|і)\s+/u).filter(Boolean);
       let any = false, last = null;
       for (const seg of segs) {
@@ -415,7 +419,8 @@ export function parseNews(rawText) {
         const ev = {
           kind: 'drone', status: 'launch', site,
           groups: gm ? Number(gm[1]) : null,
-          jet: JET_W.test(st) || (droneAll && (segs.length === 1 || segs.filter(sg => siteIn(norm(sg)).length).length === 1)),   // «Реактивні з Криму, з Чауди» — один майданчик у реченні
+          jet: JET_W.test(st) || (droneAll && (segs.length === 1 || segs.filter(sg => siteIn(norm(sg)).length).length === 1 || jetLead) && !/звичайн|поршнев|класичн/u.test(st)),   // «пуски реактивних з Орла 3 групи, Донецьк 3 групи» — «реактивних» на початку стосується всіх
+          recap: RECAP_RE.test(t),   // «Відбулися пуски…» — підсумок уже відомих пусків
           droneType: BANDEROL_RE.test(t) ? 'banderol' : /shahed|шахед|герань|geran/u.test(t) ? 'shahed' : 'unknown',
           possible: isThreat,                       // «Можливі пуски …» — карта блимає як зазвичай, але в тексті підписано «можливі»
           targets: targetsIn(t),
@@ -423,6 +428,7 @@ export function parseNews(rawText) {
           normal: null, jetN: null, unit: 'drones',
         };
         applyCounts(ev, st);
+        if (ev.jet && ev.normal != null && ev.jetN == null && !/звичайн|поршнев|класичн/u.test(st)) { ev.jetN = ev.normal; ev.normal = null; }   // «Гвардійське 2 групи» у списку реактивних
         events.push(ev);
         last = ev;
         jetFix(ev, events);
@@ -434,6 +440,20 @@ export function parseNews(rawText) {
   }
   // реактивні — лише з «реактивних» майданчиків (після того, як усі кількості дописані)
   events.filter(e => e.kind === 'drone' && !e.via).forEach(e => jetFix(e, events));
+  // «реактивні з Брянська 2 групи, Курська 3 групи» — обидва з Орла: в одному повідомленні це РІЗНІ групи → складаємо, траси перелічуємо
+  for (let i = 0; i < events.length; i++) {
+    const a = events[i]; if (a.kind !== 'drone' || !a.via || a._gone) continue;
+    for (let j = i + 1; j < events.length; j++) {
+      const b = events[j]; if (b.kind !== 'drone' || !b.via || b._gone || !b.site || b.site.id !== a.site.id || b.via === a.via || b.droneType !== a.droneType) continue;
+      if (b.groups != null) a.groups = (a.groups || 0) + b.groups;
+      if (b.jetN != null) a.jetN = (a.jetN || 0) + b.jetN;
+      if (b.normal != null) a.normal = (a.normal || 0) + b.normal;
+      a.via = a.via.replace(/ область$/, '') + ' та ' + b.via.replace(/ область$/, '') + (/ область$/.test(b.via) ? ' області' : '');
+      if (b.targets && b.targets.length) a.targets = [...new Set([...(a.targets || []), ...b.targets])];
+      b._gone = true;
+    }
+  }
+  for (let i = events.length - 1; i >= 0; i--) if (events[i]._gone) events.splice(i, 1);
   // ── фільтр «маячні» ──
   // 1) підсумки/звіти про минулу атаку («У ніч на 26 листопада противник атакував… з Курської області. Збито…») — це не новий пуск і не загроза
   if (SUMMARY_RE.test(norm(text))) return events.filter(e => e.kind === 'delivery');
@@ -453,7 +473,8 @@ export function mergeEvents(list) {
     if (!o) { m.set(key, { ...e, key }); continue; }
     if (e.groups != null) o.groups = Math.max(o.groups || 0, e.groups);
     if (e.kind === 'drone') {
-      o.possible = !!(o.possible && e.possible);                // підтверджений пуск перекриває «можливий»
+      o.possible = !!(o.possible && e.possible);
+      o.recap = !!(o.recap && e.recap);                // підтверджений пуск перекриває «можливий»
       if (e.targets && e.targets.length) o.targets = [...new Set([...(o.targets || []), ...e.targets])];
     }
     if (e.jet) o.jet = true;
@@ -574,6 +595,7 @@ export function pickNewEvents(raw, state, now, { maxAgeMin = 20 } = {}) {
     const moreCnt = e.kind === 'delivery' && (e.count || 0) > ((prev && prev.c) || 0);   // доставка: число зросло (40 → 70)
     const confirmed = !!(prev && prev.p && !e.possible);          // було «можливі пуски», тепер — пуск
     if (prev && now - prev.t <= ttl && !more && !moreMis && !moreCnt && !confirmed) continue;   // уже публікували нещодавно
+    if (e.recap && prev && now - prev.t <= 4 * 3600000 && !more && !moreCnt) continue;     // «Відбулися пуски…» — підсумок того, що вже публікували
     out.push(e);
     stamps.push([e.key, { t: now, g: e.groups || 0, m: mis, c: e.count || 0, p: e.possible ? 1 : 0 }]);
   }
